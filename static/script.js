@@ -22,7 +22,7 @@ let aiAnnotateModel = ''; // 当前选择的AI模型
 let aiAnnotateConfidence = 0.5; // AI标注置信度阈值
 let aiAutoNext = false; // 保存后是否自动切换下一张（默认关闭）
 let aiAnnotating = false; // 是否正在进行AI标注
-let aiAnnotateEngine = 'yolo11'; // AI标注引擎（yolo11 | yolo-world）
+let aiAnnotateEngine = 'yolo11'; // AI标注引擎（yolo11 | sam3）
 let aiAutoRangeStart = null; // AI自动标注起始序号（1-based）
 let aiAutoRangeEnd = null; // AI自动标注结束序号（1-based）
 let workflowSelectedStep = null; // 用户手动选择的步骤（1-6）
@@ -1134,7 +1134,7 @@ function updateWorkflowGuide() {
         suggestedStep = 2;
     } else if (annotated < COLD_START_MIN_ANNOTATED) {
         step3.classList.add('active');
-        hintEl.textContent = `当前建议：先用 YOLO-World 批量预标，再人工兜底（已 ${annotated}/${COLD_START_MIN_ANNOTATED}）`;
+        hintEl.textContent = `当前建议：先用 SAM3 批量预标，再人工兜底（已 ${annotated}/${COLD_START_MIN_ANNOTATED}）`;
         suggestedStep = 3;
     } else if (annotated < 150) {
         step5.classList.add('active');
@@ -1200,13 +1200,13 @@ function renderWorkflowStepDetail(step, snapshot) {
             ]
         },
         3: {
-            title: `步骤3：YOLO-World预标+人工兜底（${COLD_START_MIN_ANNOTATED}张）`,
-            goal: '目标：用 YOLO-World 快速冷启动并人工兜底',
+            title: `步骤3：SAM3预标+人工兜底（${COLD_START_MIN_ANNOTATED}张）`,
+            goal: '目标：用 SAM3 快速冷启动并人工兜底',
             dod: `完成标准：已标注 >= ${COLD_START_MIN_ANNOTATED} 张（当前 ${snapshot.annotated}/${COLD_START_MIN_ANNOTATED}）`,
-            actionLabel: '去YOLO-World预标',
-            taskDesc: '先用 YOLO-World 批量预标，再逐张人工复核，保证质量与效率。',
+            actionLabel: '去SAM3预标',
+            taskDesc: '先用 SAM3 批量预标，再逐张人工复核，保证质量与效率。',
             checklist: [
-                { text: 'AI引擎选择为 YOLO-World 并完成一轮预标', done: snapshot.annotated > 0 },
+                { text: 'AI引擎选择为 SAM3 并完成一轮预标', done: snapshot.annotated > 0 },
                 { text: `已标注数量达到${COLD_START_MIN_ANNOTATED}张（当前 ${snapshot.annotated}）`, done: snapshot.annotated >= COLD_START_MIN_ANNOTATED },
                 { text: '抽检关键类别并人工修正漏标/误标', done: snapshot.annotated >= COLD_START_MIN_ANNOTATED },
                 { text: '可启动 v1.0 训练', done: snapshot.annotated >= COLD_START_MIN_ANNOTATED }
@@ -1276,8 +1276,8 @@ function runWorkflowNextAction() {
             showToast('在右侧“标签管理”中添加标签，至少创建1个');
             break;
         case 3:
-            showAiAnnotateModal('yolo-world');
-            showToast('冷启动建议选择 YOLO-World，先批量预标再人工兜底');
+            showAiAnnotateModal('sam3');
+            showToast('冷启动建议选择 SAM3，先批量预标再人工兜底');
             break;
         case 4:
             showTrainingCenterModal();
@@ -2661,7 +2661,7 @@ function showAiAnnotateModal(preferredEngine = null) {
     const modal = document.getElementById('aiAnnotateModal');
     modal.style.display = 'block';
 
-    if (preferredEngine === 'yolo-world' || preferredEngine === 'yolo11') {
+    if (preferredEngine === 'sam3' || preferredEngine === 'yolo11') {
         aiAnnotateEngine = preferredEngine;
     }
 
@@ -2690,7 +2690,7 @@ function showAiAnnotateModal(preferredEngine = null) {
 function getRecommendedAiEngineForCurrentStep() {
     const nextBtn = document.getElementById('workflowNextBtn');
     const currentStep = Number(workflowSelectedStep || nextBtn?.dataset?.step || 0);
-    if (currentStep === 3) return 'yolo-world';
+    if (currentStep === 3) return 'sam3';
     return 'yolo11';
 }
 
@@ -2720,11 +2720,11 @@ function onAiEngineChanged() {
     aiAnnotateEngine = engineSelect?.value || 'yolo11';
     const worldGroup = document.getElementById('worldClassesGroup');
     if (worldGroup) {
-        worldGroup.style.display = aiAnnotateEngine === 'yolo-world' ? 'block' : 'none';
+        worldGroup.style.display = aiAnnotateEngine === 'sam3' ? 'block' : 'none';
     }
     const startBtn = document.getElementById('aiAnnotateStartBtn');
     if (startBtn) {
-        if (aiAnnotateEngine === 'yolo-world') {
+        if (aiAnnotateEngine === 'sam3') {
             startBtn.innerHTML = '<i class="fas fa-magic"></i> 开始区间预标注';
         } else {
             startBtn.innerHTML = '<i class="fas fa-play"></i> 开启AI标注';
@@ -2740,18 +2740,26 @@ function loadAiModels() {
     
     modelSelect.innerHTML = '<option value="">-- 加载中... --</option>';
 
-    if (aiAnnotateEngine === 'yolo-world') {
-        const worldModels = ['yolov8s-worldv2.pt', 'yolov8m-worldv2.pt', 'yolov8l-worldv2.pt'];
-        modelSelect.innerHTML = '';
-        worldModels.forEach(model => {
-            const option = document.createElement('option');
-            option.value = model;
-            option.textContent = model;
-            modelSelect.appendChild(option);
-        });
-        const preferred = aiAnnotateModel && worldModels.includes(aiAnnotateModel) ? aiAnnotateModel : 'yolov8s-worldv2.pt';
-        modelSelect.value = preferred;
-        aiAnnotateModel = preferred;
+    if (aiAnnotateEngine === 'sam3') {
+        fetch('/api/sam3/status')
+            .then(r => r.json())
+            .then(status => {
+                modelSelect.innerHTML = '';
+                if (status.loaded) {
+                    const option = document.createElement('option');
+                    option.value = 'sam3';
+                    option.textContent = 'SAM3 (' + (status.model_path || '').split(/[\\/]/).pop() + ')';
+                    modelSelect.appendChild(option);
+                    modelSelect.value = 'sam3';
+                    aiAnnotateModel = 'sam3';
+                } else {
+                    modelSelect.innerHTML = '<option value="">-- SAM3模型未加载 --</option>';
+                    showToast('SAM3模型未加载，请检查模型文件路径');
+                }
+            })
+            .catch(() => {
+                modelSelect.innerHTML = '<option value="">-- SAM3状态检查失败 --</option>';
+            });
         return;
     }
 
@@ -2870,14 +2878,14 @@ function enableAiAnnotate() {
         return;
     }
 
-    if (aiAnnotateEngine === 'yolo-world') {
+    if (aiAnnotateEngine === 'sam3') {
         const worldClasses = getWorldClassesInput();
         if (!worldClasses.length) {
             showToast('请先输入至少一个目标类（如 base,frame,mirror,screw）');
             return;
         }
-        // YOLO-World 默认走批量预标注（按区间），避免用户误以为“开启AI标注”会自动处理多张
-        showToast('YOLO-World 将按你设置的区间执行批量预标注，请稍候...');
+        // SAM3 默认走批量预标注（按区间），避免用户误以为”开启AI标注”会自动处理多张
+        showToast('SAM3 将按你设置的区间执行批量预标注，请稍候...');
         startBatchAnnotate();
         return;
     }
@@ -2990,8 +2998,8 @@ function performAiAnnotate() {
     showToast('正在进行AI标注...');
     
     const installPath = document.getElementById('yolo11InstallPath')?.value || 'plugins/yolo11';
-    const worldClasses = aiAnnotateEngine === 'yolo-world' ? getWorldClassesInput() : [];
-    const endpoint = aiAnnotateEngine === 'yolo-world' ? '/api/ai-annotate-world' : '/api/ai-annotate';
+    const worldClasses = aiAnnotateEngine === 'sam3' ? getWorldClassesInput() : [];
+    const endpoint = aiAnnotateEngine === 'sam3' ? '/api/ai-annotate-sam3' : '/api/ai-annotate';
     
     fetch(endpoint, {
         method: 'POST',
@@ -3129,10 +3137,10 @@ async function startBatchAnnotate() {
         return;
     }
     const installPath = document.getElementById('yolo11InstallPath')?.value || 'plugins/yolo11';
-    const worldClasses = engine === 'yolo-world' ? getWorldClassesInput() : [];
+    const worldClasses = engine === 'sam3' ? getWorldClassesInput() : [];
 
-    if (engine === 'yolo-world' && worldClasses.length === 0) {
-        showToast('请先输入 YOLO-World 的目标类（如 base,frame,mirror,screw）');
+    if (engine === 'sam3' && worldClasses.length === 0) {
+        showToast('请先输入 SAM3 的目标类（如 base,frame,mirror,screw）');
         return;
     }
     
@@ -3204,7 +3212,7 @@ async function startBatchAnnotate() {
         
         try {
             // 使用批量API
-            const endpoint = engine === 'yolo-world' ? '/api/ai-annotate-world-batch' : '/api/ai-annotate-batch';
+            const endpoint = engine === 'sam3' ? '/api/ai-annotate-sam3-batch' : '/api/ai-annotate-batch';
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {

@@ -1,0 +1,86 @@
+/* 视频AI对比测试页样式 */
+:root {
+    --vt-bg: #f4f6f9;
+    --vt-surface: #ffffff;
+    --vt-border: #e3e8ef;
+    --vt-text: #1f2937;
+    --vt-muted: #6b7280;
+    --vt-accent: #2563eb;
+    --vt-accent-soft: #dbeafe;
+    --vt-success: #16a34a;
+    --vt-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; background: var(--vt-bg); color: var(--vt-text); font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+
+.vt-page { min-height: 100vh; display: flex; flex-direction: column; }
+
+.vt-header {
+    display: flex; align-items: baseline; gap: 16px;
+    padding: 14px 24px; background: var(--vt-surface);
+    border-bottom: 1px solid var(--vt-border); box-shadow: var(--vt-shadow);
+}
+.vt-header h1 { font-size: 18px; margin: 0; color: var(--vt-text); }
+.vt-header h1 i { color: var(--vt-accent); margin-right: 6px; }
+.vt-back { color: var(--vt-accent); text-decoration: none; font-size: 14px; }
+.vt-back:hover { text-decoration: underline; }
+.vt-sub { color: var(--vt-muted); font-size: 13px; }
+
+.vt-layout { flex: 1; display: grid; grid-template-columns: 320px 1fr; gap: 20px; padding: 20px 24px; }
+
+/* 控制面板 */
+.vt-panel {
+    background: var(--vt-surface); border: 1px solid var(--vt-border);
+    border-radius: 10px; padding: 18px; box-shadow: var(--vt-shadow);
+    display: flex; flex-direction: column; gap: 18px; align-self: start;
+}
+.vt-group { display: flex; flex-direction: column; gap: 8px; }
+.vt-label { font-size: 13px; font-weight: 600; color: var(--vt-text); }
+.vt-row { display: flex; gap: 8px; }
+.vt-full { width: 100%; }
+.vt-select, .vt-input {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--vt-border);
+    border-radius: 6px; font-size: 13px; background: #fff; color: var(--vt-text);
+}
+.vt-select:focus, .vt-input:focus { outline: none; border-color: var(--vt-accent); box-shadow: 0 0 0 3px var(--vt-accent-soft); }
+.vt-engine { display: flex; gap: 16px; }
+.vt-radio, .vt-check { font-size: 13px; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.vt-subpanel { background: var(--vt-bg); border: 1px dashed var(--vt-border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.vt-range { width: 100%; accent-color: var(--vt-accent); }
+.vt-start { font-size: 15px; padding: 10px; margin-top: 4px; }
+.vt-start:disabled { opacity: 0.6; cursor: not-allowed; }
+.vt-hint { font-size: 12px; color: var(--vt-muted); min-height: 16px; }
+.vt-note { font-size: 12px; color: var(--vt-muted); background: var(--vt-bg); border-radius: 6px; padding: 8px 10px; line-height: 1.5; }
+
+/* 进度 */
+.vt-status { background: var(--vt-bg); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.vt-progress { height: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; }
+.vt-progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--vt-accent), #38bdf8); transition: width 0.3s ease; border-radius: 6px; }
+.vt-status-text { font-size: 12px; color: var(--vt-text); }
+.vt-status.error .vt-progress-bar { background: #ef4444; }
+.vt-status.done .vt-progress-bar { background: var(--vt-success); }
+
+/* 舞台 */
+.vt-stage { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.vt-videos { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.vt-videobox { background: var(--vt-surface); border: 1px solid var(--vt-border); border-radius: 10px; overflow: hidden; box-shadow: var(--vt-shadow); display: flex; flex-direction: column; }
+.vt-videotitle { padding: 10px 14px; font-size: 13px; font-weight: 600; border-bottom: 1px solid var(--vt-border); display: flex; align-items: center; justify-content: space-between; }
+.vt-badge { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 10px; background: #e5e7eb; color: var(--vt-muted); }
+.vt-badge.ready { background: var(--vt-accent-soft); color: var(--vt-accent); }
+.vt-videobox video { width: 100%; aspect-ratio: 16 / 9; background: #000; display: block; object-fit: contain; }
+.vt-syncbar { background: var(--vt-surface); border: 1px solid var(--vt-border); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 16px; }
+.vt-syncbar .vt-progress { flex: 1; }
+
+/* 流式图 */
+.vt-streamwrap { position: relative; background: #000; }
+.vt-stream { width: 100%; display: none; aspect-ratio: 32 / 9; object-fit: contain; background: #000; }
+.vt-placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #9ca3af; gap: 12px; text-align: center; font-size: 14px; background: #111827; aspect-ratio: 32 / 9; }
+.vt-placeholder i { font-size: 44px; opacity: 0.6; }
+.vt-divider { color: var(--vt-muted); margin: 0 8px; }
+
+@media (max-width: 1024px) {
+    .vt-layout { grid-template-columns: 1fr; }
+    .vt-videos { grid-template-columns: 1fr; }
+}

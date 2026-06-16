@@ -21,6 +21,14 @@ from flask_cors import CORS
 from PIL import Image
 
 
+from plugins.sam3_service import sam3_service
+from plugins.video_inference import (
+    video_inference_service,
+    list_available_videos,
+    resolve_video_path,
+    UPLOAD_VIDEO_DIR as VC_UPLOAD_DIR,
+)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -1471,8 +1479,8 @@ print("###JSON_END###")
         return jsonify({'error': f'批量AI标注失败: {str(e)}'}), 500
 
 
-def parse_world_classes(raw_value):
-    """Parse target classes for YOLO-World from list/string; fallback to local class config."""
+def parse_target_classes(raw_value):
+    """Parse target classes for SAM3 from list/string; fallback to local class config."""
     parsed = []
     if isinstance(raw_value, list):
         for item in raw_value:
@@ -1498,113 +1506,39 @@ def parse_world_classes(raw_value):
     return fallback
 
 
-def resolve_python_path(install_path):
-    """Prefer plugin venv python, fallback to current python."""
-    if os.name == 'nt':
-        venv_python = os.path.join(install_path, 'venv', 'Scripts', 'python.exe')
-    else:
-        venv_python = os.path.join(install_path, 'venv', 'bin', 'python')
-    return venv_python if os.path.exists(venv_python) else sys.executable
+@app.route('/api/sam3/status')
+def sam3_status():
+    """Check SAM3 model availability."""
+    model_path = os.environ.get("SAM3_MODEL_PATH", os.path.join(app.root_path, 'plugins', 'sam3', 'models', 'model.pt'))
+    return jsonify({
+        'loaded': sam3_service.is_loaded,
+        'model_path': model_path,
+        'model_exists': os.path.isfile(model_path),
+    })
 
 
-@app.route('/api/ai-annotate-world', methods=['POST'])
-def ai_annotate_world():
-    """Single-image auto annotation by YOLO-World with custom class prompts."""
+@app.route('/api/ai-annotate-sam3', methods=['POST'])
+def ai_annotate_sam3():
+    """Single-image auto annotation by SAM3 with text prompts."""
     try:
-        import subprocess
-
         data = request.json or {}
         image_name = data.get('image_name', '')
-        model_name = str(data.get('model_name', 'yolov8s-worldv2.pt') or 'yolov8s-worldv2.pt').strip()
         confidence = float(data.get('confidence', 0.5))
-        install_path = data.get('install_path', 'plugins/yolo11')
-        world_classes = parse_world_classes(data.get('world_classes'))
-        inference_device = resolve_training_device(data.get('device', 'auto'))
-        device_literal = repr(inference_device)
+        target_classes = parse_target_classes(data.get('target_classes') or data.get('world_classes'))
 
         if not image_name:
             return jsonify({'error': '未指定图片'}), 400
-        if not world_classes:
+        if not target_classes:
             return jsonify({'error': '请至少配置一个目标类别（例如 base,frame,mirror,screw）'}), 400
-        if not os.path.isabs(install_path):
-            install_path = os.path.join(app.root_path, install_path)
+
+        if not sam3_service.is_loaded:
+            return jsonify({'error': 'SAM3模型未加载，请检查模型文件'}), 503
 
         image_path = os.path.abspath(os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], image_name))
         if not os.path.exists(image_path):
             return jsonify({'error': f'图片不存在: {image_name}'}), 400
 
-        python_path = resolve_python_path(install_path)
-        classes_json = json.dumps(world_classes, ensure_ascii=False)
-        inference_script = f'''
-import json
-import os
-os.environ['YOLO_VERBOSE'] = 'False'
-from ultralytics import YOLO
-
-model_name = r"{model_name}"
-classes = {classes_json}
-try:
-    from ultralytics import YOLOWorld
-    model = YOLOWorld(model_name)
-except Exception:
-    model = YOLO(model_name)
-
-if hasattr(model, 'set_classes'):
-    model.set_classes(classes)
-
-results = model(r"{image_path}", conf={confidence}, device={device_literal}, verbose=False)
-annotations = []
-for result in results:
-    if result.boxes is None:
-        continue
-    for box in result.boxes:
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
-        cls_id = int(box.cls[0])
-        if cls_id < len(classes):
-            cls_name = classes[cls_id]
-        else:
-            names = getattr(model, 'names', {{}})
-            if isinstance(names, dict):
-                cls_name = names.get(cls_id, str(cls_id))
-            elif isinstance(names, list) and cls_id < len(names):
-                cls_name = names[cls_id]
-            else:
-                cls_name = str(cls_id)
-        conf = float(box.conf[0])
-        annotations.append({{
-            "class": str(cls_name),
-            "confidence": conf,
-            "points": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
-            "type": "rectangle",
-            "auto": True
-        }})
-
-print("###JSON_START###")
-print(json.dumps(annotations, ensure_ascii=False))
-print("###JSON_END###")
-'''
-        result = subprocess.run(
-            [python_path, '-c', inference_script],
-            capture_output=True,
-            text=True,
-            cwd=app.root_path,
-            timeout=180,
-            encoding='utf-8',
-            errors='ignore'
-        )
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() if result.stderr else '推理失败'
-            return jsonify({'error': f'模型推理失败: {error_msg}'}), 500
-
-        output = result.stdout
-        start_marker = "###JSON_START###"
-        end_marker = "###JSON_END###"
-        json_start = output.find(start_marker)
-        json_end = output.find(end_marker)
-        if json_start == -1 or json_end == -1:
-            return jsonify({'error': '无法解析模型输出', 'output': output[:500]}), 500
-        json_str = output[json_start + len(start_marker):json_end].strip()
-        annotations = json.loads(json_str)
+        annotations = sam3_service.detect_from_file(image_path, text=target_classes, conf=confidence)
 
         existing_classes = read_json_file(CLASSES_FILE, [])
         new_classes_added = False
@@ -1631,43 +1565,32 @@ print("###JSON_END###")
             'success': True,
             'annotations': annotations,
             'new_classes_added': new_classes_added,
-            'engine': 'yolo-world',
-            'world_classes': world_classes
+            'engine': 'sam3',
+            'target_classes': target_classes,
         })
 
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': '模型推理超时'}), 500
-    except json.JSONDecodeError as e:
-        return jsonify({'error': f'解析模型输出失败: {str(e)}'}), 500
     except Exception as e:
-        print(f"YOLO-World标注错误: {str(e)}")
+        print(f"SAM3标注错误: {str(e)}")
         print(traceback.format_exc())
-        return jsonify({'error': f'YOLO-World标注失败: {str(e)}'}), 500
+        return jsonify({'error': f'SAM3标注失败: {str(e)}'}), 500
 
 
-@app.route('/api/ai-annotate-world-batch', methods=['POST'])
-def ai_annotate_world_batch():
-    """Batch auto annotation by YOLO-World with custom class prompts."""
+@app.route('/api/ai-annotate-sam3-batch', methods=['POST'])
+def ai_annotate_sam3_batch():
+    """Batch auto annotation by SAM3 with text prompts."""
     try:
-        import subprocess
-
         data = request.json or {}
         image_names = data.get('image_names', [])
-        model_name = str(data.get('model_name', 'yolov8s-worldv2.pt') or 'yolov8s-worldv2.pt').strip()
         confidence = float(data.get('confidence', 0.5))
-        install_path = data.get('install_path', 'plugins/yolo11')
-        world_classes = parse_world_classes(data.get('world_classes'))
-        inference_device = resolve_training_device(data.get('device', 'auto'))
-        device_literal = repr(inference_device)
+        target_classes = parse_target_classes(data.get('target_classes') or data.get('world_classes'))
 
         if not image_names:
             return jsonify({'error': '未指定图片'}), 400
-        if not world_classes:
+        if not target_classes:
             return jsonify({'error': '请至少配置一个目标类别（例如 base,frame,mirror,screw）'}), 400
 
-        if not os.path.isabs(install_path):
-            install_path = os.path.join(app.root_path, install_path)
-        python_path = resolve_python_path(install_path)
+        if not sam3_service.is_loaded:
+            return jsonify({'error': 'SAM3模型未加载，请检查模型文件'}), 503
 
         image_paths = []
         valid_image_names = []
@@ -1678,82 +1601,8 @@ def ai_annotate_world_batch():
                 valid_image_names.append(img_name)
         if not image_paths:
             return jsonify({'error': '没有有效的图片'}), 400
-        image_paths_json = json.dumps(image_paths, ensure_ascii=False)
-        classes_json = json.dumps(world_classes, ensure_ascii=False)
-        inference_script = f'''
-import json
-import os
-os.environ['YOLO_VERBOSE'] = 'False'
-from ultralytics import YOLO
 
-model_name = r"{model_name}"
-classes = {classes_json}
-image_paths = {image_paths_json}
-
-try:
-    from ultralytics import YOLOWorld
-    model = YOLOWorld(model_name)
-except Exception:
-    model = YOLO(model_name)
-
-if hasattr(model, 'set_classes'):
-    model.set_classes(classes)
-
-all_results = {{}}
-results = model(image_paths, conf={confidence}, device={device_literal}, verbose=False)
-for i, result in enumerate(results):
-    img_path = image_paths[i]
-    anns = []
-    if result.boxes is not None:
-        for box in result.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            cls_id = int(box.cls[0])
-            if cls_id < len(classes):
-                cls_name = classes[cls_id]
-            else:
-                names = getattr(model, 'names', {{}})
-                if isinstance(names, dict):
-                    cls_name = names.get(cls_id, str(cls_id))
-                elif isinstance(names, list) and cls_id < len(names):
-                    cls_name = names[cls_id]
-                else:
-                    cls_name = str(cls_id)
-            conf = float(box.conf[0])
-            anns.append({{
-                "class": str(cls_name),
-                "confidence": conf,
-                "points": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
-                "type": "rectangle",
-                "auto": True
-            }})
-    all_results[img_path] = anns
-
-print("###JSON_START###")
-print(json.dumps(all_results, ensure_ascii=False))
-print("###JSON_END###")
-'''
-        result = subprocess.run(
-            [python_path, '-c', inference_script],
-            capture_output=True,
-            text=True,
-            cwd=app.root_path,
-            timeout=600,
-            encoding='utf-8',
-            errors='ignore'
-        )
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() if result.stderr else '推理失败'
-            return jsonify({'error': f'模型推理失败: {error_msg}'}), 500
-
-        output = result.stdout
-        start_marker = "###JSON_START###"
-        end_marker = "###JSON_END###"
-        json_start = output.find(start_marker)
-        json_end = output.find(end_marker)
-        if json_start == -1 or json_end == -1:
-            return jsonify({'error': '无法解析模型输出', 'output': output[:500]}), 500
-        json_str = output[json_start + len(start_marker):json_end].strip()
-        all_results = json.loads(json_str)
+        all_results = sam3_service.detect_batch_from_files(image_paths, text=target_classes, conf=confidence)
 
         existing_classes = read_json_file(CLASSES_FILE, [])
         annotations = read_json_file(ANNOTATIONS_FILE, {})
@@ -1788,7 +1637,7 @@ print("###JSON_END###")
                 'image_name': image_name,
                 'success': True,
                 'count': len(image_annotations),
-                'annotations': image_annotations
+                'annotations': image_annotations,
             })
 
         write_json_file(ANNOTATIONS_FILE, annotations)
@@ -1800,18 +1649,14 @@ print("###JSON_END###")
             'total_processed': len(valid_image_names),
             'total_detected': total_detected,
             'new_classes_added': new_class_count,
-            'engine': 'yolo-world',
-            'world_classes': world_classes
+            'engine': 'sam3',
+            'target_classes': target_classes,
         })
 
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': '批量模型推理超时'}), 500
-    except json.JSONDecodeError as e:
-        return jsonify({'error': f'解析模型输出失败: {str(e)}'}), 500
     except Exception as e:
-        print(f"批量YOLO-World标注错误: {str(e)}")
+        print(f"批量SAM3标注错误: {str(e)}")
         print(traceback.format_exc())
-        return jsonify({'error': f'批量YOLO-World标注失败: {str(e)}'}), 500
+        return jsonify({'error': f'批量SAM3标注失败: {str(e)}'}), 500
 
 
 @app.route('/api/check-yolo11-install')
@@ -2498,16 +2343,208 @@ def model_activate(model_id):
     return jsonify({"message": "model activated", "active": get_active_model()})
 
 
+# =================== 视频AI对比测试 ===================
+
+
+def _parse_classes(raw) -> list:
+    """把 SAM3 目标类别从 list/str 解析成干净的字符串列表。"""
+    if isinstance(raw, list):
+        return [str(c).strip() for c in raw if str(c).strip()]
+    if isinstance(raw, str):
+        s = raw.replace('，', ',').replace('\n', ',').replace(';', ',')
+        return [c.strip() for c in s.split(',') if c.strip()]
+    return []
+
+
+@app.route('/video-test')
+def video_test_page():
+    """视频AI对比测试独立页面。"""
+    return render_template('video_test.html')
+
+
+@app.route('/api/video-test/videos')
+def video_test_videos():
+    """列出可选视频（默认素材 + 上传）。"""
+    return jsonify({'videos': list_available_videos()})
+
+
+@app.route('/api/video-test/video/<path:name>')
+def video_test_serve(name):
+    """服务原视频文件。"""
+    path = resolve_video_path(name)
+    if not path:
+        return jsonify({'error': '视频不存在'}), 404
+    return send_from_directory(os.path.dirname(path), os.path.basename(path))
+
+
+@app.route('/api/video-test/upload', methods=['POST'])
+def video_test_upload():
+    """上传视频到 uploads/video_compare。"""
+    if 'video' not in request.files:
+        return jsonify({'error': '未提供视频文件'}), 400
+    f = request.files['video']
+    if not f.filename:
+        return jsonify({'error': '未选择文件'}), 400
+    safe = secure_filename(f.filename) or 'video.mp4'
+    base, ext = os.path.splitext(safe)
+    if ext.lower() not in VIDEO_EXTENSIONS:
+        return jsonify({'error': f'不支持的视频格式: {ext}'}), 400
+    name = safe
+    i = 1
+    while os.path.exists(os.path.join(VC_UPLOAD_DIR, name)):
+        name = f"{base}_{i}{ext}"
+        i += 1
+    f.save(os.path.join(VC_UPLOAD_DIR, name))
+    return jsonify({'message': '上传成功', 'name': name, 'url': f'/api/video-test/video/{name}'})
+
+
+@app.route('/api/video-test/yolo-models')
+def video_test_yolo_models():
+    """YOLO 模型下拉：预训练 + 项目已训练模型。"""
+    models = [{'name': 'yolo11n.pt (COCO 80类 预训练)', 'value': 'yolo11n.pt'}]
+    try:
+        md = get_models_dir()
+        for fn in sorted(os.listdir(md)):
+            if fn.endswith('.pt'):
+                models.append({'name': f'{fn} (已训练)', 'value': os.path.join(md, fn)})
+    except Exception:
+        pass
+    active = get_active_model()
+    preferred = active.get('model_path', '')
+    return jsonify({'models': models, 'active': preferred})
+
+
+@app.route('/api/video-test/start', methods=['POST'])
+def video_test_start():
+    """启动视频推理任务。"""
+    data = request.json or {}
+    name = (data.get('video_name') or '').strip()
+    engine = (data.get('engine') or 'yolo').strip().lower()
+    try:
+        target_fps = int(data.get('target_fps', 2))
+    except (TypeError, ValueError):
+        target_fps = 2
+    try:
+        conf = float(data.get('confidence', 0.35))
+    except (TypeError, ValueError):
+        conf = 0.35
+
+    if engine not in ('yolo', 'sam3'):
+        return jsonify({'error': '引擎必须是 yolo 或 sam3'}), 400
+    if target_fps not in (1, 2, 5):
+        return jsonify({'error': '帧率仅支持 1/2/5'}), 400
+
+    path = resolve_video_path(name)
+    if not path:
+        return jsonify({'error': f'视频不存在: {name}'}), 400
+
+    if engine == 'sam3':
+        if not sam3_service.is_loaded:
+            return jsonify({'error': 'SAM3 模型未加载，请先确认模型已就绪'}), 503
+        classes = _parse_classes(data.get('classes'))
+        if not classes:
+            return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
+        job = video_inference_service.start_job(
+            path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
+    else:
+        model_path = data.get('model') or 'yolo11n.pt'
+        job = video_inference_service.start_job(
+            path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
+
+    return jsonify({'job_id': job['id'], 'status': job['status']})
+
+
+@app.route('/api/video-test/stream/<job_id>')
+def video_test_stream(job_id):
+    """SSE 实时推送推理进度。"""
+    def gen():
+        try:
+            for chunk in video_inference_service.stream_progress(job_id):
+                yield chunk
+        except GeneratorExit:
+            return
+        except Exception as exc:
+            yield f"data: {json.dumps({'status': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+    return Response(gen(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/video-test/job/<job_id>')
+def video_test_job(job_id):
+    job = video_inference_service.get_job(job_id)
+    if not job:
+        return jsonify({'error': '任务不存在'}), 404
+    return jsonify(job)
+
+
+@app.route('/api/video-test/stream/start', methods=['POST'])
+def video_test_stream_start():
+    """启动流式 MJPEG 推理会话（边算边播）。"""
+    data = request.json or {}
+    name = (data.get('video_name') or '').strip()
+    engine = (data.get('engine') or 'yolo').strip().lower()
+    try:
+        target_fps = int(data.get('target_fps', 2))
+    except (TypeError, ValueError):
+        target_fps = 2
+    try:
+        conf = float(data.get('confidence', 0.35))
+    except (TypeError, ValueError):
+        conf = 0.35
+
+    if engine not in ('yolo', 'sam3'):
+        return jsonify({'error': '引擎必须是 yolo 或 sam3'}), 400
+    if target_fps not in (1, 2, 5):
+        return jsonify({'error': '帧率仅支持 1/2/5'}), 400
+
+    path = resolve_video_path(name)
+    if not path:
+        return jsonify({'error': f'视频不存在: {name}'}), 400
+
+    if engine == 'sam3':
+        if not sam3_service.is_loaded:
+            return jsonify({'error': 'SAM3 模型未加载，请先确认模型已就绪'}), 503
+        classes = _parse_classes(data.get('classes'))
+        if not classes:
+            return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
+        res = video_inference_service.start_stream_session(
+            path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
+    else:
+        model_path = data.get('model') or 'yolo11n.pt'
+        res = video_inference_service.start_stream_session(
+            path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
+
+    return jsonify(res)
+
+
+@app.route('/api/video-test/stream/frames/<sid>')
+def video_test_stream_frames(sid):
+    """MJPEG 流：原帧+AI帧水平拼接，边算边播。"""
+    return Response(
+        video_inference_service.stream_mjpeg(sid),
+        mimetype='multipart/x-mixed-replace; boundary=frame',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@app.route('/api/video-test/stream/status/<sid>')
+def video_test_stream_status(sid):
+    s = video_inference_service.get_session(sid)
+    if not s:
+        return jsonify({'error': '会话不存在'}), 404
+    return jsonify(s)
+
+
+@app.route('/api/video-test/stream/stop/<sid>', methods=['POST'])
+def video_test_stream_stop(sid):
+    return jsonify({'stopped': video_inference_service.stop_session(sid)})
+
+
 if __name__ == '__main__':
+    try:
+        sam3_service.load_model()
+        sam3_service.warmup()
+    except Exception as e:
+        print(f"[WARNING] SAM3 model failed to load: {e}")
+        print("SAM3 auto-annotation will not be available. Set SAM3_MODEL_PATH env var or place model at plugins/sam3/models/model.pt")
     app.run(debug=True, host='0.0.0.0', port=5000)
-
-
-def process_content_data(content_data, annotations):
-    """处理内容数据并提取标注"""
-    print(f"处理内容数据: {content_data}")
-    # TODO: 在这里添加您的自定义处理代码
-
-def process_list_data(data_list, annotations):
-    """处理列表数据并提取标注"""
-    print(f"处理列表数据: {data_list}")
-    # TODO: 在这里添加您的自定义处理代码

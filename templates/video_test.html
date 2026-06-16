@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频AI对比测试 - PH</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='all.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='video_test.css') }}">
+</head>
+<body>
+    <div class="vt-page">
+        <header class="vt-header">
+            <a href="/" class="vt-back"><i class="fas fa-arrow-left"></i> 返回标注</a>
+            <h1><i class="fas fa-film"></i> 视频AI对比测试</h1>
+            <span class="vt-sub">全帧推理 · 进度可见 · 产出AI视频对比</span>
+        </header>
+
+        <div class="vt-layout">
+            <!-- 控制面板 -->
+            <aside class="vt-panel">
+                <div class="vt-group">
+                    <label class="vt-label">1. 选择视频</label>
+                    <div class="vt-row">
+                        <select id="videoSelect" class="vt-select"></select>
+                        <button id="refreshVideosBtn" class="btn btn-secondary" title="刷新列表"><i class="fas fa-sync"></i></button>
+                    </div>
+                    <button id="uploadBtn" class="btn btn-primary vt-full"><i class="fas fa-upload"></i> 上传视频</button>
+                    <input type="file" id="videoFile" accept="video/*" hidden>
+                    <div id="uploadMsg" class="vt-hint"></div>
+                </div>
+
+                <div class="vt-group">
+                    <label class="vt-label">2. 引擎</label>
+                    <div class="vt-engine">
+                        <label class="vt-radio"><input type="radio" name="engine" value="yolo" checked> YOLO</label>
+                        <label class="vt-radio"><input type="radio" name="engine" value="sam3"> SAM3 (开放词汇)</label>
+                    </div>
+
+                    <div id="yoloPanel" class="vt-subpanel">
+                        <label class="vt-label">YOLO 模型</label>
+                        <select id="yoloModel" class="vt-select"></select>
+                    </div>
+
+                    <div id="sam3Panel" class="vt-subpanel" style="display:none;">
+                        <label class="vt-label">SAM3 目标类别 (text, 英文逗号分隔)</label>
+                        <input type="text" id="sam3Classes" class="vt-input" placeholder="person,car,dog" value="person,car">
+                    </div>
+                </div>
+
+                <div class="vt-group">
+                    <label class="vt-label">置信度: <span id="confVal">0.35</span></label>
+                    <input type="range" id="confRange" min="0.1" max="0.9" step="0.05" value="0.35" class="vt-range">
+                </div>
+
+                <button id="startBtn" class="btn btn-success vt-full vt-start"><i class="fas fa-play"></i> 开始全帧推理</button>
+
+                <div id="statusArea" class="vt-status" style="display:none;">
+                    <div class="vt-progress"><div id="progressBar" class="vt-progress-bar"></div></div>
+                    <div id="statusText" class="vt-status-text"></div>
+                </div>
+
+                <div class="vt-note">
+                    全帧推理：视频每一帧都跑模型，进度实时可见，处理完产出带标注的AI视频（与原视频左右对比）。<br>
+                    YOLO 较快；SAM3 每帧~1.6s(GPU)，长视频会较慢，下方会显示ETA。
+                </div>
+            </aside>
+
+            <!-- 双视频对比 -->
+            <main class="vt-stage">
+                <div class="vt-videos">
+                    <div class="vt-videobox">
+                        <div class="vt-videotitle">原视频</div>
+                        <video id="origVideo" controls playsinline></video>
+                    </div>
+                    <div class="vt-videobox">
+                        <div class="vt-videotitle">AI 视频 <span id="aiBadge" class="vt-badge">待生成</span></div>
+                        <video id="aiVideo" controls playsinline></video>
+                    </div>
+                </div>
+                <div class="vt-syncbar">
+                    <label class="vt-check"><input type="checkbox" id="syncToggle" checked> 双视频同步联动</label>
+                    <span id="syncInfo" class="vt-hint"></span>
+                </div>
+            </main>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='video_test.js') }}"></script>
+</body>
+</html>

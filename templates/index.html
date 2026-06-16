@@ -30,6 +30,11 @@
                     </button>
                 </div>
                 <div class="btn-group">
+                    <button id="videoTestBtn" class="btn btn-info" title="视频AI对比测试" onclick="window.location.href='/video-test'">
+                        <i class="fas fa-film"></i> 视频AI测试
+                    </button>
+                </div>
+                <div class="btn-group">
                     <button id="clearAnnotationBtn" class="btn btn-danger">
                         <i class="fas fa-trash"></i> 清除
                     </button>
@@ -63,12 +68,12 @@
         <section class="workflow-guide" id="workflowGuide">
             <div class="workflow-title">
                 <i class="fas fa-route"></i>
-                <span>推荐流程：导入数据 -> YOLO-World预标+人工兜底(20张) -> 训练v1.0 -> 业务模型AI标注+复核 -> 增量训练 -> 导出</span>
+                <span>推荐流程：导入数据 -> SAM3预标+人工兜底(20张) -> 训练v1.0 -> 业务模型AI标注+复核 -> 增量训练 -> 导出</span>
             </div>
             <div class="workflow-steps">
                 <span class="wf-step" id="wfStep1">1 导入数据</span>
                 <span class="wf-step" id="wfStep2">2 设置标签</span>
-                <span class="wf-step" id="wfStep3">3 YOLO-World预标+兜底(20张)</span>
+                <span class="wf-step" id="wfStep3">3 SAM3预标+兜底(20张)</span>
                 <span class="wf-step" id="wfStep4">4 训练 v1.0</span>
                 <span class="wf-step" id="wfStep5">5 AI标注+复核</span>
                 <span class="wf-step" id="wfStep6">6 增量训练与导出</span>
@@ -81,7 +86,7 @@
                 </div>
                 <div class="workflow-quick-btns">
                     <button id="quickImportBtn" class="btn btn-small btn-primary"><i class="fas fa-upload"></i> 导入</button>
-                    <button id="quickAiBtn" class="btn btn-small btn-warning"><i class="fas fa-robot"></i> YOLO-World预标</button>
+                    <button id="quickAiBtn" class="btn btn-small btn-warning"><i class="fas fa-robot"></i> SAM3预标</button>
                     <button id="quickTrainBtn" class="btn btn-small btn-info"><i class="fas fa-flask"></i> 训练</button>
                     <button id="quickExportBtn" class="btn btn-small btn-success"><i class="fas fa-download"></i> 导出</button>
                     <button id="workflowNextBtn" class="btn btn-small btn-primary"><i class="fas fa-arrow-right"></i> 执行下一步</button>
@@ -274,9 +279,9 @@
                     <label for="aiEngineSelect">标注引擎:</label>
                     <select id="aiEngineSelect" class="form-control">
                         <option value="yolo11" selected>YOLO11（业务模型）</option>
-                        <option value="yolo-world">YOLO-World（冷启动预标）</option>
+                        <option value="sam3">SAM3（冷启动预标）</option>
                     </select>
-                    <small>冷启动推荐 YOLO-World；迭代阶段推荐业务 YOLO 模型</small>
+                    <small>冷启动推荐 SAM3；迭代阶段推荐业务 YOLO 模型</small>
                 </div>
 
                 <div class="form-group">
@@ -287,9 +292,9 @@
                     <small>请先在设置中安装YOLO11并下载或上传模型</small>
                 </div>
                 <div class="form-group" id="worldClassesGroup" style="display: none;">
-                    <label for="worldClassesInput">YOLO-World目标类（逗号分隔）:</label>
+                    <label for="worldClassesInput">SAM3目标类（逗号分隔）:</label>
                     <input type="text" id="worldClassesInput" class="form-control" placeholder="base,frame,mirror,screw">
-                    <small>示例：base,frame,mirror,screw；为空时默认读取当前类别列表</small>
+                    <small>示例：base,frame,mirror,screw；支持英文描述如 "person with blue cloth"；为空时默认读取当前类别列表</small>
                 </div>
 
                 <div class="form-group">
