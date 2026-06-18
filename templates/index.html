@@ -691,6 +691,31 @@
                     <h4>训练准备度</h4>
                     <div id="trainReadiness" class="timeline-summary">Loading...</div>
                     <div id="trainCudaStatus" class="timeline-summary">CUDA状态：检测中...</div>
+                    <div class="train-split-card">
+                        <div class="train-section-title">高级数据切分</div>
+                        <div class="train-split-ratios">
+                            <label>Train <input type="number" id="splitTrainRatio" value="0.8" min="0" max="1" step="0.05"></label>
+                            <label>Val <input type="number" id="splitValRatio" value="0.15" min="0" max="1" step="0.05"></label>
+                            <label>Test <input type="number" id="splitTestRatio" value="0.05" min="0" max="1" step="0.05"></label>
+                        </div>
+                        <div class="train-split-options">
+                            <label>样本过滤
+                                <select id="splitSampleFilter">
+                                    <option value="annotated">仅已标注</option>
+                                    <option value="all">全部图片（训练仍以有标签样本为准）</option>
+                                </select>
+                            </label>
+                            <div>
+                                <div class="train-split-label">类别过滤</div>
+                                <div id="splitClassFilters" class="train-class-filter-list">加载中...</div>
+                            </div>
+                        </div>
+                        <div id="trainSplitSummary" class="timeline-summary">切分摘要：加载中...</div>
+                        <div class="timeline-actions">
+                            <button id="saveTrainSplitBtn" class="btn btn-primary btn-small" type="button">保存切分</button>
+                            <button id="resetTrainSplitBtn" class="btn btn-secondary btn-small" type="button">重置切分</button>
+                        </div>
+                    </div>
                     <div class="timeline-inline-row">
                         <label>Epochs</label>
                         <input type="number" id="trainEpochs" value="30" min="1" max="500">
@@ -718,8 +743,17 @@
         </div>
     </div>
 
+    <div id="trainArtifactModal" class="modal train-artifact-modal">
+        <div class="modal-content train-artifact-content">
+            <span class="close">&times;</span>
+            <h2><i class="fas fa-chart-line"></i> <span id="trainArtifactTitle">训练产物</span></h2>
+            <div id="trainArtifactBody" class="train-artifact-body">请选择训练任务查看产物</div>
+        </div>
+    </div>
+
     <div id="toast" class="toast"></div>
 
+    <script src="{{ url_for('static', filename='vendor/chart.js') }}"></script>
     <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>

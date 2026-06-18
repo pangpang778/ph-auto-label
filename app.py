@@ -15,7 +15,7 @@ import cv2
 import sys
 from urllib.parse import urlparse
 from io import StringIO
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 from PIL import Image
@@ -27,6 +27,14 @@ from plugins.video_inference import (
     list_available_videos,
     resolve_video_path,
     UPLOAD_VIDEO_DIR as VC_UPLOAD_DIR,
+)
+from training_artifacts import (
+    ARTIFACT_CONTENT_TYPES,
+    list_native_images,
+    read_log_tail,
+    read_training_metrics_series,
+    resolve_artifact,
+    resolve_native_image,
 )
 
 app = Flask(__name__)
@@ -55,6 +63,10 @@ SCENARIO_FILE = os.path.join(ANNOTATIONS_FOLDER, 'sop_scenario.json')
 TRAIN_JOBS_FILE = os.path.join(ANNOTATIONS_FOLDER, 'train_jobs.json')
 MODEL_REGISTRY_FILE = os.path.join(ANNOTATIONS_FOLDER, 'model_registry.json')
 ACTIVE_MODEL_FILE = os.path.join(ANNOTATIONS_FOLDER, 'active_model.json')
+TRAINING_SPLITS_FILE = os.path.join(ANNOTATIONS_FOLDER, 'training_splits.json')
+TRAIN_JOBS_LOCK = threading.Lock()
+TRAINING_SPLITS_LOCK = threading.Lock()
+MODEL_REGISTRY_LOCK = threading.Lock()
 VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v')
 
 # 初始化注释文件
@@ -92,6 +104,10 @@ if not os.path.exists(MODEL_REGISTRY_FILE):
 if not os.path.exists(ACTIVE_MODEL_FILE):
     with open(ACTIVE_MODEL_FILE, 'w', encoding='utf-8') as f:
         json.dump({"model_id": "", "model_name": "", "model_path": ""}, f, ensure_ascii=False, indent=2)
+
+if not os.path.exists(TRAINING_SPLITS_FILE):
+    with open(TRAINING_SPLITS_FILE, 'w', encoding='utf-8') as f:
+        json.dump({}, f, ensure_ascii=False, indent=2)
 
 
 def read_json_file(path, default):
@@ -248,30 +264,42 @@ def get_models_dir() -> str:
 
 
 def read_train_jobs() -> list[dict]:
-    return read_json_file(TRAIN_JOBS_FILE, [])
+    with TRAIN_JOBS_LOCK:
+        return read_json_file(TRAIN_JOBS_FILE, [])
 
 
 def write_train_jobs(jobs: list[dict]) -> None:
-    write_json_file(TRAIN_JOBS_FILE, jobs)
+    with TRAIN_JOBS_LOCK:
+        write_json_file(TRAIN_JOBS_FILE, jobs)
 
 
 def upsert_train_job(job: dict) -> None:
-    jobs = read_train_jobs()
-    for i, old in enumerate(jobs):
-        if old.get("id") == job.get("id"):
-            jobs[i] = job
-            write_train_jobs(jobs)
-            return
-    jobs.append(job)
-    write_train_jobs(jobs)
+    with TRAIN_JOBS_LOCK:
+        jobs = read_json_file(TRAIN_JOBS_FILE, [])
+        for i, old in enumerate(jobs):
+            if old.get("id") == job.get("id"):
+                jobs[i] = job
+                write_json_file(TRAIN_JOBS_FILE, jobs)
+                return
+        jobs.append(job)
+        write_json_file(TRAIN_JOBS_FILE, jobs)
 
 
 def read_model_registry() -> list[dict]:
-    return read_json_file(MODEL_REGISTRY_FILE, [])
+    with MODEL_REGISTRY_LOCK:
+        return read_json_file(MODEL_REGISTRY_FILE, [])
 
 
 def write_model_registry(models: list[dict]) -> None:
-    write_json_file(MODEL_REGISTRY_FILE, models)
+    with MODEL_REGISTRY_LOCK:
+        write_json_file(MODEL_REGISTRY_FILE, models)
+
+
+def append_model_registry_record(model_record: dict) -> None:
+    with MODEL_REGISTRY_LOCK:
+        models = read_json_file(MODEL_REGISTRY_FILE, [])
+        models.append(model_record)
+        write_json_file(MODEL_REGISTRY_FILE, models)
 
 
 def get_active_model() -> dict:
@@ -324,6 +352,166 @@ def get_cuda_status() -> dict:
     return status
 
 
+def read_training_splits() -> dict:
+    with TRAINING_SPLITS_LOCK:
+        return read_json_file(TRAINING_SPLITS_FILE, {})
+
+
+def write_training_splits(data: dict) -> None:
+    with TRAINING_SPLITS_LOCK:
+        write_json_file(TRAINING_SPLITS_FILE, data)
+
+
+def normalize_split_config(raw: dict | None) -> dict:
+    raw = raw or {}
+    train_ratio = float(raw.get("train_ratio", 0.8))
+    val_ratio = float(raw.get("val_ratio", 0.15))
+    test_ratio = float(raw.get("test_ratio", 0.05))
+    total = train_ratio + val_ratio + test_ratio
+    if abs(total - 100.0) <= 0.01:
+        train_ratio /= 100.0
+        val_ratio /= 100.0
+        test_ratio /= 100.0
+        total = train_ratio + val_ratio + test_ratio
+    if min(train_ratio, val_ratio, test_ratio) <= 0 or abs(total - 1.0) > 0.001:
+        raise ValueError("train_ratio, val_ratio and test_ratio must be positive and sum to 1.0 or 100")
+
+    class_filter = raw.get("class_filter") or raw.get("selected_classes") or []
+    if isinstance(class_filter, str):
+        class_filter = [x.strip() for x in class_filter.replace("，", ",").split(",") if x.strip()]
+    else:
+        class_filter = [str(x).strip() for x in class_filter if str(x).strip()]
+
+    assignments = raw.get("assignments") if isinstance(raw.get("assignments"), dict) else {}
+    normalized_assignments = {}
+    for split in ("train", "val", "test"):
+        names = assignments.get(split, []) if assignments else []
+        normalized_assignments[split] = [str(name) for name in names if str(name)]
+
+    return {
+        "profile_id": str(raw.get("profile_id") or "default"),
+        "train_ratio": train_ratio,
+        "val_ratio": val_ratio,
+        "test_ratio": test_ratio,
+        "sample_filter": str(raw.get("sample_filter") or "annotated"),
+        "class_filter": class_filter,
+        "assignments": normalized_assignments,
+    }
+
+
+def _image_matches_class_filter(image_name: str, annotations: dict, class_filter: list[str]) -> bool:
+    if not class_filter:
+        return True
+    selected = set(class_filter)
+    return any(ann.get("class") in selected for ann in annotations.get(image_name, []))
+
+
+def collect_training_candidates(split_config: dict | None = None) -> dict:
+    config = normalize_split_config(split_config)
+    classes = read_json_file(CLASSES_FILE, [])
+    class_names = [c.get('name') for c in classes if c.get('name')]
+    annotations = read_json_file(ANNOTATIONS_FILE, {})
+    image_names = sorted(name for name in os.listdir(app.config['UPLOAD_FOLDER']) if name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')))
+    annotated = [name for name in image_names if annotations.get(name)]
+    filtered = [name for name in annotated if _image_matches_class_filter(name, annotations, config["class_filter"])]
+    unannotated = [name for name in image_names if not annotations.get(name)]
+    return {
+        "class_names": class_names,
+        "image_names": image_names,
+        "annotations": annotations,
+        "annotated": annotated,
+        "candidates": filtered,
+        "unannotated": unannotated,
+        "config": config,
+    }
+
+
+def assign_training_splits(candidates: list[str], split_config: dict | None = None, legacy: bool = False) -> dict:
+    if legacy:
+        annotated = list(candidates)
+        random.Random(42).shuffle(annotated)
+        n = len(annotated)
+        n_train = max(1, int(n * 0.8))
+        n_val = max(1, int(n * 0.15))
+        train_set = annotated[:n_train]
+        val_set = annotated[n_train:n_train + n_val]
+        test_set = annotated[n_train + n_val:] or annotated[:1]
+        return {"train": train_set, "val": val_set, "test": test_set}
+
+    config = normalize_split_config(split_config)
+    candidate_set = set(candidates)
+    requested = config.get("assignments", {})
+    if any(requested.get(split) for split in ("train", "val", "test")):
+        assigned = {split: [name for name in requested.get(split, []) if name in candidate_set] for split in ("train", "val", "test")}
+        used = set(assigned["train"] + assigned["val"] + assigned["test"])
+        leftovers = [name for name in candidates if name not in used]
+        assigned["train"].extend(leftovers)
+        return assigned
+
+    shuffled = list(candidates)
+    random.Random(42).shuffle(shuffled)
+    n = len(shuffled)
+    n_train = max(1, int(n * config["train_ratio"]))
+    n_val = max(1, int(n * config["val_ratio"]))
+    if n_train + n_val >= n:
+        n_val = max(1, n - n_train - 1) if n > 2 else max(0, n - n_train)
+    return {
+        "train": shuffled[:n_train],
+        "val": shuffled[n_train:n_train + n_val],
+        "test": shuffled[n_train + n_val:] or shuffled[:1],
+    }
+
+
+def split_counts(splits: dict) -> dict:
+    return {split: len(splits.get(split, [])) for split in ("train", "val", "test")}
+
+
+def build_split_summary(split_config: dict | None = None, persist_assignments: bool = False) -> dict:
+    candidates = collect_training_candidates(split_config)
+    splits = assign_training_splits(candidates["candidates"], candidates["config"])
+    config = dict(candidates["config"])
+    if persist_assignments:
+        config["assignments"] = splits
+    return {
+        "split_config": config,
+        "counts": split_counts(splits),
+        "class_options": candidates["class_names"],
+        "candidate_totals": {
+            "total_images": len(candidates["image_names"]),
+            "annotated_images": len(candidates["annotated"]),
+            "candidate_images": len(candidates["candidates"]),
+            "unannotated_images": len(candidates["unannotated"]),
+        },
+        "updated_at": now_iso(),
+    }
+
+
+def load_split_profile(profile_id: str = "default") -> dict | None:
+    profiles = read_training_splits()
+    profile = profiles.get(profile_id)
+    return profile.get("split_config") if isinstance(profile, dict) else None
+
+
+def save_split_profile(split_config: dict) -> dict:
+    summary = build_split_summary(split_config, persist_assignments=True)
+    profile_id = summary["split_config"].get("profile_id") or "default"
+    with TRAINING_SPLITS_LOCK:
+        profiles = read_json_file(TRAINING_SPLITS_FILE, {})
+        profiles[profile_id] = summary
+        write_json_file(TRAINING_SPLITS_FILE, profiles)
+    return summary
+
+
+def append_train_log(job: dict, message: str) -> None:
+    log_path = job.get("log_path")
+    if not log_path:
+        return
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"[{now_iso()}] {message}\n")
+    job["log_tail"] = read_log_tail(log_path, 50)
+
+
 def _annotation_to_bbox(ann: dict, width: int, height: int):
     points = ann.get('points', [])
     if not points:
@@ -358,28 +546,18 @@ def _annotation_to_bbox(ann: dict, width: int, height: int):
     return cx, cy, nw, nh
 
 
-def build_yolo_training_dataset(work_dir: str) -> dict:
-    classes = read_json_file(CLASSES_FILE, [])
-    class_names = [c.get('name') for c in classes if c.get('name')]
+def build_yolo_training_dataset(work_dir: str, split_config: dict | None = None) -> dict:
+    candidates = collect_training_candidates(split_config)
+    class_names = candidates["class_names"]
     if not class_names:
         raise RuntimeError("No classes found. Please create labels first.")
     class_to_id = {name: i for i, name in enumerate(class_names)}
-    annotations = read_json_file(ANNOTATIONS_FILE, {})
-
-    image_names = [name for name in os.listdir(app.config['UPLOAD_FOLDER']) if name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
-    annotated = [name for name in image_names if annotations.get(name)]
-    if len(annotated) < 20:
+    annotations = candidates["annotations"]
+    training_images = candidates["annotated"] if split_config is None else candidates["candidates"]
+    if len(training_images) < 20:
         raise RuntimeError("Need at least 20 annotated images before training.")
 
-    random.Random(42).shuffle(annotated)
-    n = len(annotated)
-    n_train = max(1, int(n * 0.8))
-    n_val = max(1, int(n * 0.15))
-    train_set = annotated[:n_train]
-    val_set = annotated[n_train:n_train + n_val]
-    test_set = annotated[n_train + n_val:] or annotated[:1]
-    splits = {"train": train_set, "val": val_set, "test": test_set}
-
+    splits = assign_training_splits(training_images, candidates["config"], legacy=split_config is None)
     dataset_root = os.path.join(work_dir, "dataset")
     for split in splits.keys():
         os.makedirs(os.path.join(dataset_root, split, "images"), exist_ok=True)
@@ -410,7 +588,6 @@ def build_yolo_training_dataset(work_dir: str) -> dict:
 
     data_yaml = os.path.join(dataset_root, "data.yaml")
     with open(data_yaml, "w", encoding="utf-8") as f:
-        # Use absolute dataset root to avoid Ultralytics resolving paths against project cwd.
         dataset_root_abs = os.path.abspath(dataset_root).replace("\\", "/")
         f.write(f"path: {dataset_root_abs}\n")
         f.write("train: train/images\n")
@@ -423,8 +600,12 @@ def build_yolo_training_dataset(work_dir: str) -> dict:
         "dataset_root": dataset_root,
         "data_yaml": data_yaml,
         "class_names": class_names,
-        "total_images": len(image_names),
-        "annotated_images": len(annotated),
+        "total_images": len(candidates["image_names"]),
+        "annotated_images": len(candidates["annotated"]),
+        "candidate_images": len(training_images),
+        "split_counts": split_counts(splits),
+        "split_config": candidates["config"],
+        "assignments": splits,
     }
 
 
@@ -489,22 +670,30 @@ def run_training_job(job_id: str) -> None:
     job = next((x for x in jobs if x.get("id") == job_id), None)
     if not job:
         return
+    job_dir = os.path.join(app.root_path, "static", "train_work", job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    job["log_path"] = os.path.join(job_dir, "train.log")
     job["status"] = "running"
     job["progress"] = 5
     job["message"] = "Preparing training dataset..."
+    job["epoch"] = 0
+    job["total_epochs"] = int(job.get("epochs", 50))
     job["updated_at"] = now_iso()
+    append_train_log(job, "Preparing training dataset...")
     upsert_train_job(job)
 
     try:
-        job_dir = os.path.join(app.root_path, "static", "train_work", job_id)
-        os.makedirs(job_dir, exist_ok=True)
-        dataset = build_yolo_training_dataset(job_dir)
+        dataset = build_yolo_training_dataset(job_dir, job.get("split_config"))
         job["dataset_dir"] = dataset["dataset_root"]
         job["annotated_images"] = dataset["annotated_images"]
         job["total_images"] = dataset["total_images"]
+        job["candidate_images"] = dataset["candidate_images"]
+        job["split_counts"] = dataset["split_counts"]
+        job["split_config"] = dataset["split_config"]
         job["progress"] = 20
         job["message"] = "Dataset prepared. Starting model training..."
         job["updated_at"] = now_iso()
+        append_train_log(job, f"Dataset prepared with split counts: {dataset['split_counts']}")
         upsert_train_job(job)
 
         from ultralytics import YOLO
@@ -516,7 +705,31 @@ def run_training_job(job_id: str) -> None:
         job["progress"] = 45
         job["message"] = "Training in progress..."
         job["updated_at"] = now_iso()
+        append_train_log(job, f"Training started: base_model={base_model}, device={job.get('device', 'cpu')}, epochs={job.get('epochs', 50)}")
         upsert_train_job(job)
+
+        persist_state = {"last_time": 0.0, "last_epoch": 0}
+        total_epochs = int(job.get("epochs", 50))
+        persist_every = max(1, total_epochs // 50)
+
+        def on_train_epoch_end(trainer):
+            epoch = int(getattr(trainer, "epoch", 0) or 0) + 1
+            job["epoch"] = min(epoch, total_epochs)
+            job["total_epochs"] = total_epochs
+            job["progress"] = min(95, 25 + int((job["epoch"] / max(total_epochs, 1)) * 70))
+            job["message"] = f"Training epoch {job['epoch']}/{total_epochs}"
+            append_train_log(job, job["message"])
+            now = time.time()
+            if epoch % persist_every == 0 or now - persist_state["last_time"] >= 5:
+                job["updated_at"] = now_iso()
+                upsert_train_job(job)
+                persist_state["last_time"] = now
+                persist_state["last_epoch"] = epoch
+
+        try:
+            model.add_callback("on_train_epoch_end", on_train_epoch_end)
+        except Exception as callback_exc:
+            append_train_log(job, f"Epoch callback unavailable: {callback_exc}")
 
         model.train(
             data=dataset["data_yaml"],
@@ -550,6 +763,7 @@ def run_training_job(job_id: str) -> None:
         shutil.copy2(trained_model, model_dst)
 
         results_csv = os.path.join(run_dir, "results.csv")
+        results_png = os.path.join(run_dir, "results.png")
         metrics = _extract_metrics_from_results_csv(results_csv)
         model_id = f"model_{uuid.uuid4().hex[:10]}"
         model_record = {
@@ -563,10 +777,13 @@ def run_training_job(job_id: str) -> None:
             "created_at": now_iso(),
             "job_id": job_id,
             "status": "candidate",
+            "results_csv": results_csv if os.path.exists(results_csv) else "",
+            "results_png": results_png if os.path.exists(results_png) else "",
+            "weights_path": trained_model,
+            "run_dir": run_dir,
+            "split_counts": job.get("split_counts", {}),
         }
-        models = read_model_registry()
-        models.append(model_record)
-        write_model_registry(models)
+        append_model_registry_record(model_record)
 
         # auto activate newest successful model
         set_active_model(model_id=model_id, model_name=model_filename, model_path=model_dst)
@@ -575,11 +792,17 @@ def run_training_job(job_id: str) -> None:
         job["progress"] = 100
         job["message"] = f"Training completed. Model {model_filename} is ready."
         job["artifact_path"] = model_dst
+        job["weights_path"] = trained_model
         job["metrics"] = metrics
         job["model_id"] = model_id
         job["version"] = version
         job["run_dir"] = run_dir
+        job["results_csv"] = results_csv if os.path.exists(results_csv) else ""
+        job["results_png"] = results_png if os.path.exists(results_png) else ""
+        job["epoch"] = int(job.get("epochs", 50))
+        job["total_epochs"] = int(job.get("epochs", 50))
         job["updated_at"] = now_iso()
+        append_train_log(job, f"Training completed. Model {model_filename} is ready.")
         upsert_train_job(job)
 
     except Exception as exc:
@@ -588,6 +811,7 @@ def run_training_job(job_id: str) -> None:
         job["message"] = f"Training failed: {str(exc)}"
         job["error"] = traceback.format_exc()
         job["updated_at"] = now_iso()
+        append_train_log(job, job["message"])
         upsert_train_job(job)
 
 
@@ -2256,6 +2480,33 @@ def train_readiness():
     return jsonify(training_readiness())
 
 
+@app.route('/api/train/split')
+def train_split_get():
+    profile_id = request.args.get("profile_id", "default")
+    split_config = load_split_profile(profile_id) or {"profile_id": profile_id}
+    return jsonify(build_split_summary(split_config))
+
+
+@app.route('/api/train/split', methods=['POST'])
+def train_split_save():
+    payload = request.json or {}
+    try:
+        return jsonify(save_split_profile(payload.get("split_config") or payload))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route('/api/train/split/reset', methods=['POST'])
+def train_split_reset():
+    payload = request.json or {}
+    profile_id = str(payload.get("profile_id") or "default")
+    with TRAINING_SPLITS_LOCK:
+        profiles = read_json_file(TRAINING_SPLITS_FILE, {})
+        profiles.pop(profile_id, None)
+        write_json_file(TRAINING_SPLITS_FILE, profiles)
+    return jsonify(build_split_summary({"profile_id": profile_id}))
+
+
 @app.route('/api/train/jobs')
 def train_jobs():
     jobs = read_train_jobs()
@@ -2272,6 +2523,106 @@ def train_job_detail(job_id):
     return jsonify(job)
 
 
+def _get_train_job_or_404(job_id: str):
+    job = next((x for x in read_train_jobs() if x.get("id") == job_id), None)
+    if not job:
+        return None, (jsonify({"error": "job not found"}), 404)
+    return job, None
+
+
+def _artifact_allowed_roots() -> list[str]:
+    return [os.path.join(app.root_path, "static", "train_work"), get_models_dir()]
+
+
+@app.route('/api/train/jobs/<job_id>/logs')
+def train_job_logs(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        max_lines = int(request.args.get("tail", 200))
+        path = resolve_artifact(job, "log", _artifact_allowed_roots())
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return jsonify({"job_id": job_id, "log": read_log_tail(path, max_lines), "tail": max_lines})
+
+
+@app.route('/api/train/jobs/<job_id>/metrics')
+def train_job_metrics(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_artifact(job, "results_csv", _artifact_allowed_roots())
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return jsonify(read_training_metrics_series(path))
+
+
+@app.route('/api/train/jobs/<job_id>/results-image')
+def train_job_results_image(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_artifact(job, "results_png", _artifact_allowed_roots())
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except (PermissionError, ValueError):
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return send_file(path, mimetype="image/png")
+
+
+@app.route('/api/train/jobs/<job_id>/native-images')
+def train_job_native_images(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    return jsonify({"job_id": job_id, "images": list_native_images(job, _artifact_allowed_roots())})
+
+
+@app.route('/api/train/jobs/<job_id>/native-images/<image_name>')
+def train_job_native_image(job_id, image_name):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_native_image(job, image_name, _artifact_allowed_roots())
+    except ValueError:
+        return jsonify({"error": "unsupported image"}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "image not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "image is not allowed"}), 403
+    mimetype = "image/jpeg" if image_name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    return send_file(path, mimetype=mimetype)
+
+
+@app.route('/api/train/jobs/<job_id>/download/<artifact>')
+def train_job_download(job_id, artifact):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_artifact(job, artifact, _artifact_allowed_roots())
+    except ValueError:
+        return jsonify({"error": "unsupported artifact"}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return send_file(
+        path,
+        mimetype=ARTIFACT_CONTENT_TYPES.get(artifact, "application/octet-stream"),
+        as_attachment=True,
+        download_name=os.path.basename(path),
+    )
+
+
 @app.route('/api/train/start', methods=['POST'])
 def train_start():
     payload = request.json or {}
@@ -2284,6 +2635,15 @@ def train_start():
         return jsonify({"error": f"Need at least {readiness['min_for_initial']} annotated images for initial training", "readiness": readiness}), 400
 
     active = get_active_model()
+    try:
+        if payload.get("split_config"):
+            split_config = normalize_split_config(payload.get("split_config"))
+        else:
+            split_config = load_split_profile(str(payload.get("split_profile_id") or "default"))
+            split_config = normalize_split_config(split_config or {"profile_id": str(payload.get("split_profile_id") or "default")})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     base_model = payload.get("base_model")
     if not base_model:
         if mode == "incremental" and active.get("model_path") and os.path.exists(active.get("model_path")):
@@ -2307,6 +2667,16 @@ def train_start():
         "device": resolve_training_device(payload.get("device", "auto")),
         "annotated_images": readiness["annotated_images"],
         "total_images": readiness["total_images"],
+        "split_config": split_config,
+        "split_counts": {},
+        "log_path": os.path.join(app.root_path, "static", "train_work", job_id, "train.log"),
+        "log_tail": "",
+        "results_csv": "",
+        "results_png": "",
+        "weights_path": "",
+        "run_dir": "",
+        "epoch": 0,
+        "total_epochs": int(payload.get("epochs", 30)),
     }
     upsert_train_job(job)
 
