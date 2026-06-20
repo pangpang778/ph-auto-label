@@ -11,13 +11,17 @@
 <body>
     <div class="vt-page">
         <header class="vt-header">
-            <a href="/" class="vt-back"><i class="fas fa-arrow-left"></i> 返回标注</a>
-            <h1><i class="fas fa-film"></i> 视频AI对比测试</h1>
-            <span class="vt-sub">全帧推理 · 进度可见 · 产出AI视频对比</span>
+            <div class="vt-brandline">
+                <a href="/" class="vt-back"><i class="fas fa-arrow-left"></i> 返回标注</a>
+                <span class="vt-kicker">AI VIDEO LAB</span>
+            </div>
+            <div>
+                <h1><i class="fas fa-clapperboard"></i> 视频 AI 四分屏监看台</h1>
+                <span class="vt-sub">原声同步 · 四路对比 · 全帧推理输出</span>
+            </div>
         </header>
 
         <div class="vt-layout">
-            <!-- 控制面板 -->
             <aside class="vt-panel">
                 <div class="vt-group">
                     <label class="vt-label">1. 选择视频</label>
@@ -31,10 +35,10 @@
                 </div>
 
                 <div class="vt-group">
-                    <label class="vt-label">2. 引擎</label>
+                    <label class="vt-label">2. 推理引擎</label>
                     <div class="vt-engine">
                         <label class="vt-radio"><input type="radio" name="engine" value="yolo" checked> YOLO</label>
-                        <label class="vt-radio"><input type="radio" name="engine" value="sam3"> SAM3 (开放词汇)</label>
+                        <label class="vt-radio"><input type="radio" name="engine" value="sam3"> SAM3</label>
                     </div>
 
                     <div id="yoloPanel" class="vt-subpanel">
@@ -43,7 +47,7 @@
                     </div>
 
                     <div id="sam3Panel" class="vt-subpanel" style="display:none;">
-                        <label class="vt-label">SAM3 目标类别 (text, 英文逗号分隔)</label>
+                        <label class="vt-label">SAM3 目标类别</label>
                         <input type="text" id="sam3Classes" class="vt-input" placeholder="person,car,dog" value="person,car">
                     </div>
                 </div>
@@ -60,28 +64,46 @@
                     <div id="statusText" class="vt-status-text"></div>
                 </div>
 
+                <div class="vt-control-card">
+                    <label class="vt-check"><input type="checkbox" id="syncToggle" checked> 四屏同步播放</label>
+                    <label class="vt-label" for="volumeRange">主原声音量: <span id="volumeVal">80%</span></label>
+                    <input type="range" id="volumeRange" min="0" max="1" step="0.05" value="0.8" class="vt-range">
+                    <button id="quadPlayBtn" class="btn btn-primary vt-full" type="button"><i class="fas fa-play"></i> 同步播放/暂停</button>
+                    <span id="syncInfo" class="vt-hint">声音来自左上原视频，其余三屏静音同步。</span>
+                </div>
+
                 <div class="vt-note">
-                    全帧推理：视频每一帧都跑模型，进度实时可见，处理完产出带标注的AI视频（与原视频左右对比）。<br>
-                    YOLO 较快；SAM3 每帧~1.6s(GPU)，长视频会较慢，下方会显示ETA。
+                    AI 输出视频会保留原视频音轨；播放时只开左上原声，避免多路声音叠加。四屏会同步播放、暂停、拖动和倍速。
                 </div>
             </aside>
 
-            <!-- 双视频对比 -->
             <main class="vt-stage">
-                <div class="vt-videos">
-                    <div class="vt-videobox">
-                        <div class="vt-videotitle">原视频</div>
+                <div class="vt-stage-head">
+                    <div>
+                        <span class="vt-kicker">QUAD SYNC VIEW</span>
+                        <h2>左侧原视频 · 右侧 AI 视频</h2>
+                    </div>
+                    <span id="aiBadge" class="vt-badge">待生成</span>
+                </div>
+
+                <section class="vt-quad" aria-label="四分屏视频对比">
+                    <article class="vt-videobox vt-original vt-primary">
+                        <div class="vt-videotitle"><span>原视频 A</span><small>主声音源</small></div>
                         <video id="origVideo" controls playsinline></video>
-                    </div>
-                    <div class="vt-videobox">
-                        <div class="vt-videotitle">AI 视频 <span id="aiBadge" class="vt-badge">待生成</span></div>
-                        <video id="aiVideo" controls playsinline></video>
-                    </div>
-                </div>
-                <div class="vt-syncbar">
-                    <label class="vt-check"><input type="checkbox" id="syncToggle" checked> 双视频同步联动</label>
-                    <span id="syncInfo" class="vt-hint"></span>
-                </div>
+                    </article>
+                    <article class="vt-videobox vt-ai vt-primary">
+                        <div class="vt-videotitle"><span>AI 视频 A</span><small>检测叠加</small></div>
+                        <video id="aiVideo" controls playsinline muted></video>
+                    </article>
+                    <article class="vt-videobox vt-original">
+                        <div class="vt-videotitle"><span>原视频 B</span><small>同步对照</small></div>
+                        <video id="origVideoB" playsinline muted></video>
+                    </article>
+                    <article class="vt-videobox vt-ai">
+                        <div class="vt-videotitle"><span>AI 视频 B</span><small>同步对照</small></div>
+                        <video id="aiVideoB" playsinline muted></video>
+                    </article>
+                </section>
             </main>
         </div>
     </div>

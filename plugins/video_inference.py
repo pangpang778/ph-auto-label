@@ -88,6 +88,25 @@ def probe_video(video_path: str) -> Dict[str, Any]:
             "total_frames": total_frames, "duration": round(duration, 3)}
 
 
+def build_encode_command(video_path: str, width: int, height: int, fps: float, output_path: str) -> List[str]:
+    return [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}", "-r", str(fps),
+        "-i", "pipe:0",
+        "-i", video_path,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        "-pix_fmt", "yuv420p",
+        "-preset", "fast", "-crf", "23",
+        "-shortest",
+        "-v", "quiet",
+        output_path,
+    ]
+
+
 def _drain_stderr(proc: subprocess.Popen, sink: Optional[List[str]] = None) -> threading.Thread:
     """后台读取子进程 stderr，防止管道缓冲区满导致死锁。"""
     def _read():
@@ -233,16 +252,7 @@ class VideoInferenceService:
                 decode_proc = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 decode_thread = _drain_stderr(decode_proc)
 
-                # ffmpeg 编码：输入 raw bgr24 @ target_fps，输出 libx264 mp4
-                encode_cmd = [
-                    "ffmpeg", "-y",
-                    "-f", "rawvideo", "-pix_fmt", "bgr24",
-                    "-s", f"{width}x{height}", "-r", str(src_fps),
-                    "-i", "pipe:0",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                    "-preset", "fast", "-crf", "23", "-v", "quiet",
-                    out_path,
-                ]
+                encode_cmd = build_encode_command(video_path, width, height, src_fps, out_path)
                 encode_proc = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
                 encode_thread = _drain_stderr(encode_proc, encode_err)
 
