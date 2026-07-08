@@ -9,9 +9,8 @@ from flask import Blueprint, jsonify, request, send_file, send_from_directory
 from app.common.config import PATHS, VIDEO_EXTENSIONS
 from app.common.json_store import read_json_file, write_json_file
 from app.common.utils import now_iso
-from app.repositories.annotation_repo import read_classes
 from app.repositories.timeline_repo import read_scenario, read_timelines, write_scenario, write_timelines
-from app.services.annotation_service import sync_object_classes_to_labels
+from app.services.annotation_service import read_classes, sync_object_classes_to_labels
 from app.services.video_timeline_service import load_yaml_file, normalize_timeline_segment, parse_sop_scenario
 from plugins.video_inference import list_available_videos, resolve_video_path
 

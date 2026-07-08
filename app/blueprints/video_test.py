@@ -5,7 +5,7 @@ import os
 from flask import Blueprint, Response, jsonify, request, send_from_directory
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
-from app.services.video_test_service import _parse_classes
+from app.services.video_test_service import _parse_classes, parse_video_test_params
 from plugins.sam3_service import sam3_service
 from plugins.video_inference import list_available_videos, resolve_video_path, video_inference_service
 
@@ -74,21 +74,10 @@ def video_test_yolo_models():
 def video_test_start():
     """启动视频推理任务。"""
     data = request.json or {}
-    name = (data.get('video_name') or '').strip()
-    engine = (data.get('engine') or 'yolo').strip().lower()
     try:
-        target_fps = int(data.get('target_fps', 2))
-    except (TypeError, ValueError):
-        target_fps = 2
-    try:
-        conf = float(data.get('confidence', 0.35))
-    except (TypeError, ValueError):
-        conf = 0.35
-
-    if engine not in ('yolo', 'sam3'):
-        return jsonify({'error': '引擎必须是 yolo 或 sam3'}), 400
-    if target_fps not in (1, 2, 5):
-        return jsonify({'error': '帧率仅支持 1/2/5'}), 400
+        name, engine, target_fps, conf = parse_video_test_params(data)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
 
     path = resolve_video_path(name)
     if not path:
@@ -100,12 +89,10 @@ def video_test_start():
         classes = _parse_classes(data.get('classes'))
         if not classes:
             return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
-        job = video_inference_service.start_job(
-            path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
+        job = video_inference_service.start_job(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
     else:
         model_path = data.get('model') or 'yolo11n.pt'
-        job = video_inference_service.start_job(
-            path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
+        job = video_inference_service.start_job(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
 
     return jsonify({'job_id': job['id'], 'status': job['status']})
 
@@ -137,21 +124,10 @@ def video_test_job(job_id):
 def video_test_stream_start():
     """启动流式 MJPEG 推理会话（边算边播）。"""
     data = request.json or {}
-    name = (data.get('video_name') or '').strip()
-    engine = (data.get('engine') or 'yolo').strip().lower()
     try:
-        target_fps = int(data.get('target_fps', 2))
-    except (TypeError, ValueError):
-        target_fps = 2
-    try:
-        conf = float(data.get('confidence', 0.35))
-    except (TypeError, ValueError):
-        conf = 0.35
-
-    if engine not in ('yolo', 'sam3'):
-        return jsonify({'error': '引擎必须是 yolo 或 sam3'}), 400
-    if target_fps not in (1, 2, 5):
-        return jsonify({'error': '帧率仅支持 1/2/5'}), 400
+        name, engine, target_fps, conf = parse_video_test_params(data)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
 
     path = resolve_video_path(name)
     if not path:
@@ -163,12 +139,10 @@ def video_test_stream_start():
         classes = _parse_classes(data.get('classes'))
         if not classes:
             return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
-        res = video_inference_service.start_stream_session(
-            path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
+        res = video_inference_service.start_stream_session(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
     else:
         model_path = data.get('model') or 'yolo11n.pt'
-        res = video_inference_service.start_stream_session(
-            path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
+        res = video_inference_service.start_stream_session(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
 
     return jsonify(res)
 

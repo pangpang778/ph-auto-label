@@ -5,7 +5,6 @@ background run_training_job. Flask-context-free (runs in a background thread);
 paths resolve via PATHS. Cross-domain calls into the models domain go through
 models_service (closed-world contract, api-freeze.md §2).
 """
-import csv
 import json
 import math
 import os
@@ -23,11 +22,15 @@ from PIL import Image
 from app.common.config import PATHS
 from app.common.json_store import read_json_file, write_json_file
 from app.common.utils import now_iso
-from app.repositories.annotation_repo import read_annotations, read_classes
+from app.services.annotation_service import read_annotations, read_classes
 from app.repositories.train_jobs_repo import TRAIN_JOBS_LOCK, read_train_jobs, upsert_train_job, write_train_jobs
 from app.repositories.training_splits_repo import TRAINING_SPLITS_LOCK, load_split_profile, read_training_splits, write_training_splits
 from app.services import models_service
-from training_artifacts import resolve_artifact
+from app.services.training_job_runner import (
+    _extract_metrics_from_results_csv,
+    append_train_log,
+    run_training_job,
+)
 
 
 def training_readiness() -> dict:
@@ -215,17 +218,6 @@ def save_split_profile(split_config: dict) -> dict:
 
 
 
-def append_train_log(job: dict, message: str) -> None:
-    log_path = job.get("log_path")
-    if not log_path:
-        return
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"[{now_iso()}] {message}\n")
-    job["log_tail"] = read_log_tail(log_path, 50)
-
-
-
 def _annotation_to_bbox(ann: dict, width: int, height: int):
     points = ann.get('points', [])
     if not points:
@@ -261,6 +253,24 @@ def _annotation_to_bbox(ann: dict, width: int, height: int):
 
 
 
+def _write_yolo_label_file(label_path: str, anns: list, class_to_id: dict, image_path: str) -> None:
+    with Image.open(image_path) as img:
+        width, height = img.size
+    lines = []
+    for ann in anns:
+        cls_name = ann.get("class")
+        if cls_name not in class_to_id:
+            continue
+        box = _annotation_to_bbox(ann, width, height)
+        if not box:
+            continue
+        cx, cy, nw, nh = box
+        lines.append(f"{class_to_id[cls_name]} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
+    with open(label_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+
 def build_yolo_training_dataset(work_dir: str, split_config: dict | None = None) -> dict:
     candidates = collect_training_candidates(split_config)
     class_names = candidates["class_names"]
@@ -283,23 +293,8 @@ def build_yolo_training_dataset(work_dir: str, split_config: dict | None = None)
             src = os.path.join(PATHS['uploads'], image_name)
             dst = os.path.join(dataset_root, split, "images", image_name)
             shutil.copy2(src, dst)
-
             label_path = os.path.join(dataset_root, split, "labels", os.path.splitext(image_name)[0] + ".txt")
-            with Image.open(src) as img:
-                width, height = img.size
-
-            lines = []
-            for ann in annotations.get(image_name, []):
-                cls_name = ann.get("class")
-                if cls_name not in class_to_id:
-                    continue
-                box = _annotation_to_bbox(ann, width, height)
-                if not box:
-                    continue
-                cx, cy, nw, nh = box
-                lines.append(f"{class_to_id[cls_name]} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
-            with open(label_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
+            _write_yolo_label_file(label_path, annotations.get(image_name, []), class_to_id, src)
 
     data_yaml = os.path.join(dataset_root, "data.yaml")
     with open(data_yaml, "w", encoding="utf-8") as f:
@@ -325,25 +320,50 @@ def build_yolo_training_dataset(work_dir: str, split_config: dict | None = None)
 
 
 
-def _extract_metrics_from_results_csv(results_csv: str) -> dict:
-    if not os.path.exists(results_csv):
-        return {}
-    metrics = {}
-    try:
-        with open(results_csv, "r", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
-        if not rows:
-            return {}
-        row = rows[-1]
-        for key, value in row.items():
-            try:
-                metrics[key.strip()] = float(value)
-            except Exception:
-                continue
-    except Exception:
-        return {}
-    return metrics
+def build_train_job(payload, mode, readiness, active):
+    """Resolve split_config + base_model and build the queued training job dict.
 
+    Raises ``ValueError`` on invalid split_config (handler maps to 400).
+    """
+    if payload.get("split_config"):
+        split_config = normalize_split_config(payload.get("split_config"))
+    else:
+        split_config = load_split_profile(str(payload.get("split_profile_id") or "default"))
+        split_config = normalize_split_config(split_config or {"profile_id": str(payload.get("split_profile_id") or "default")})
+    base_model = payload.get("base_model")
+    if not base_model:
+        if mode == "incremental" and active.get("model_path") and os.path.exists(active.get("model_path")):
+            base_model = active.get("model_path")
+        else:
+            base_model = "yolo11n.pt"
+    job_id = f"train_{uuid.uuid4().hex[:10]}"
+    epochs = int(payload.get("epochs", 30))
+    return {
+        "id": job_id,
+        "mode": mode,
+        "status": "queued",
+        "progress": 0,
+        "message": "Queued",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "base_model": base_model,
+        "epochs": epochs,
+        "imgsz": int(payload.get("imgsz", 640)),
+        "batch": int(payload.get("batch", 8)),
+        "device": resolve_training_device(payload.get("device", "auto")),
+        "annotated_images": readiness["annotated_images"],
+        "total_images": readiness["total_images"],
+        "split_config": split_config,
+        "split_counts": {},
+        "log_path": os.path.join(PATHS['train_work'], job_id, "train.log"),
+        "log_tail": "",
+        "results_csv": "",
+        "results_png": "",
+        "weights_path": "",
+        "run_dir": "",
+        "epoch": 0,
+        "total_epochs": epochs,
+    }
 
 
 def resolve_training_device(requested_device):
@@ -358,157 +378,6 @@ def resolve_training_device(requested_device):
             pass
         return "cpu"
     return requested_device
-
-
-
-def run_training_job(job_id: str, root_path: str = "") -> None:
-    jobs = read_train_jobs()
-    job = next((x for x in jobs if x.get("id") == job_id), None)
-    if not job:
-        return
-    job_dir = os.path.join(PATHS['train_work'], job_id)
-    os.makedirs(job_dir, exist_ok=True)
-    job["log_path"] = os.path.join(job_dir, "train.log")
-    job["status"] = "running"
-    job["progress"] = 5
-    job["message"] = "Preparing training dataset..."
-    job["epoch"] = 0
-    job["total_epochs"] = int(job.get("epochs", 50))
-    job["updated_at"] = now_iso()
-    append_train_log(job, "Preparing training dataset...")
-    upsert_train_job(job)
-
-    try:
-        dataset = build_yolo_training_dataset(job_dir, job.get("split_config"))
-        job["dataset_dir"] = dataset["dataset_root"]
-        job["annotated_images"] = dataset["annotated_images"]
-        job["total_images"] = dataset["total_images"]
-        job["candidate_images"] = dataset["candidate_images"]
-        job["split_counts"] = dataset["split_counts"]
-        job["split_config"] = dataset["split_config"]
-        job["progress"] = 20
-        job["message"] = "Dataset prepared. Starting model training..."
-        job["updated_at"] = now_iso()
-        append_train_log(job, f"Dataset prepared with split counts: {dataset['split_counts']}")
-        upsert_train_job(job)
-
-        from ultralytics import YOLO
-
-        base_model = job.get("base_model") or "yolo11n.pt"
-        job["resolved_base_model"] = base_model
-        train_project = os.path.join(job_dir, "runs")
-        model = YOLO(base_model)
-        job["progress"] = 45
-        job["message"] = "Training in progress..."
-        job["updated_at"] = now_iso()
-        append_train_log(job, f"Training started: base_model={base_model}, device={job.get('device', 'cpu')}, epochs={job.get('epochs', 50)}")
-        upsert_train_job(job)
-
-        persist_state = {"last_time": 0.0, "last_epoch": 0}
-        total_epochs = int(job.get("epochs", 50))
-        persist_every = max(1, total_epochs // 50)
-
-        def on_train_epoch_end(trainer):
-            epoch = int(getattr(trainer, "epoch", 0) or 0) + 1
-            job["epoch"] = min(epoch, total_epochs)
-            job["total_epochs"] = total_epochs
-            job["progress"] = min(95, 25 + int((job["epoch"] / max(total_epochs, 1)) * 70))
-            job["message"] = f"Training epoch {job['epoch']}/{total_epochs}"
-            append_train_log(job, job["message"])
-            now = time.time()
-            if epoch % persist_every == 0 or now - persist_state["last_time"] >= 5:
-                job["updated_at"] = now_iso()
-                upsert_train_job(job)
-                persist_state["last_time"] = now
-                persist_state["last_epoch"] = epoch
-
-        try:
-            model.add_callback("on_train_epoch_end", on_train_epoch_end)
-        except Exception as callback_exc:
-            append_train_log(job, f"Epoch callback unavailable: {callback_exc}")
-
-        model.train(
-            data=dataset["data_yaml"],
-            epochs=int(job.get("epochs", 50)),
-            imgsz=int(job.get("imgsz", 640)),
-            batch=int(job.get("batch", 8)),
-            device=job.get("device", "cpu"),
-            workers=0,
-            project=train_project,
-            name="detector",
-            exist_ok=True,
-            patience=0,
-            pretrained=True,
-            verbose=True,
-            cache=False,
-            amp=False,
-        )
-        run_dir = os.path.join(train_project, "detector")
-        best_path = os.path.join(run_dir, "weights", "best.pt")
-        last_path = os.path.join(run_dir, "weights", "last.pt")
-        if os.path.exists(best_path):
-            trained_model = best_path
-        elif os.path.exists(last_path):
-            trained_model = last_path
-        else:
-            raise FileNotFoundError("Training finished but no model artifact found in weights/")
-
-        version = models_service.next_model_version(job.get("mode", "incremental"))
-        model_filename = f"{version}.pt"
-        model_dst = os.path.join(models_service.get_models_dir(), model_filename)
-        shutil.copy2(trained_model, model_dst)
-
-        results_csv = os.path.join(run_dir, "results.csv")
-        results_png = os.path.join(run_dir, "results.png")
-        metrics = _extract_metrics_from_results_csv(results_csv)
-        model_id = f"model_{uuid.uuid4().hex[:10]}"
-        model_record = {
-            "id": model_id,
-            "version": version,
-            "name": model_filename,
-            "path": model_dst,
-            "parent_model": job.get("base_model", ""),
-            "mode": job.get("mode", "incremental"),
-            "metrics": metrics,
-            "created_at": now_iso(),
-            "job_id": job_id,
-            "status": "candidate",
-            "results_csv": results_csv if os.path.exists(results_csv) else "",
-            "results_png": results_png if os.path.exists(results_png) else "",
-            "weights_path": trained_model,
-            "run_dir": run_dir,
-            "split_counts": job.get("split_counts", {}),
-        }
-        models_service.append_model_registry_record(model_record)
-
-        # auto activate newest successful model
-        models_service.set_active_model(model_id=model_id, model_name=model_filename, model_path=model_dst)
-
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["message"] = f"Training completed. Model {model_filename} is ready."
-        job["artifact_path"] = model_dst
-        job["weights_path"] = trained_model
-        job["metrics"] = metrics
-        job["model_id"] = model_id
-        job["version"] = version
-        job["run_dir"] = run_dir
-        job["results_csv"] = results_csv if os.path.exists(results_csv) else ""
-        job["results_png"] = results_png if os.path.exists(results_png) else ""
-        job["epoch"] = int(job.get("epochs", 50))
-        job["total_epochs"] = int(job.get("epochs", 50))
-        job["updated_at"] = now_iso()
-        append_train_log(job, f"Training completed. Model {model_filename} is ready.")
-        upsert_train_job(job)
-
-    except Exception as exc:
-        job["status"] = "failed"
-        job["progress"] = 100
-        job["message"] = f"Training failed: {str(exc)}"
-        job["error"] = traceback.format_exc()
-        job["updated_at"] = now_iso()
-        append_train_log(job, job["message"])
-        upsert_train_job(job)
 
 
 

@@ -45,6 +45,23 @@ def parse_sop_scenario(scenario_dir):
         raise FileNotFoundError(f'process.yaml not found in {scenario_dir}')
     process_doc = load_yaml_file(process_path)
     process = process_doc.get('process', {})
+    steps, action_ids, object_ids = _parse_process_steps(process_doc)
+    labels_dir = os.path.join(scenario_dir, 'labels')
+    object_ids = _load_object_ids(labels_dir, object_ids)
+    action_labels = _load_action_labels(labels_dir, action_ids)
+    return {
+        'scenario_id': str(process.get('id') or os.path.basename(scenario_dir)),
+        'name': str(process.get('name') or process.get('id') or os.path.basename(scenario_dir)),
+        'version': str(process.get('version') or ''),
+        'source_path': scenario_dir,
+        'steps': steps,
+        'object_classes': object_ids,
+        'action_labels': action_labels,
+    }
+
+
+def _parse_process_steps(process_doc):
+    """Extract steps + accumulated action/object ids from a process.yaml doc."""
     steps = []
     action_ids = []
     object_ids = []
@@ -67,8 +84,11 @@ def parse_sop_scenario(scenario_dir):
             'target_ids': step_objects,
             'event_type': f"{step.get('id', action_id)}_done",
         })
+    return steps, action_ids, object_ids
 
-    labels_dir = os.path.join(scenario_dir, 'labels')
+
+def _load_object_ids(labels_dir, object_ids):
+    """Load object class ids from yolo_classes.yaml, or fall back to inferred ids."""
     yolo_path = os.path.join(labels_dir, 'yolo_classes.yaml')
     if os.path.exists(yolo_path):
         yolo_doc = load_yaml_file(yolo_path)
@@ -80,7 +100,11 @@ def parse_sop_scenario(scenario_dir):
                 object_ids.append({'id': str(cls), 'name': str(cls)})
     else:
         object_ids = [{'id': oid, 'name': oid} for oid in object_ids]
+    return object_ids
 
+
+def _load_action_labels(labels_dir, action_ids):
+    """Load action labels from action_labels.yaml, or fall back to inferred ids."""
     action_path = os.path.join(labels_dir, 'action_labels.yaml')
     action_labels = []
     if os.path.exists(action_path):
@@ -92,13 +116,4 @@ def parse_sop_scenario(scenario_dir):
                 action_labels.append({'id': str(act), 'name': str(act)})
     else:
         action_labels = [{'id': aid, 'name': aid} for aid in action_ids]
-
-    return {
-        'scenario_id': str(process.get('id') or os.path.basename(scenario_dir)),
-        'name': str(process.get('name') or process.get('id') or os.path.basename(scenario_dir)),
-        'version': str(process.get('version') or ''),
-        'source_path': scenario_dir,
-        'steps': steps,
-        'object_classes': object_ids,
-        'action_labels': action_labels,
-    }
+    return action_labels

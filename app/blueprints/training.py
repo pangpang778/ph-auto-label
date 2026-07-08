@@ -17,6 +17,7 @@ from app.services.training_service import (
     _extract_metrics_from_results_csv,
     append_train_log,
     build_split_summary,
+    build_train_job,
     build_yolo_training_dataset,
     load_split_profile,
     normalize_split_config,
@@ -195,50 +196,11 @@ def train_start():
 
     active = models_service.get_active_model()
     try:
-        if payload.get("split_config"):
-            split_config = normalize_split_config(payload.get("split_config"))
-        else:
-            split_config = load_split_profile(str(payload.get("split_profile_id") or "default"))
-            split_config = normalize_split_config(split_config or {"profile_id": str(payload.get("split_profile_id") or "default")})
+        job = build_train_job(payload, mode, readiness, active)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    base_model = payload.get("base_model")
-    if not base_model:
-        if mode == "incremental" and active.get("model_path") and os.path.exists(active.get("model_path")):
-            base_model = active.get("model_path")
-        else:
-            base_model = "yolo11n.pt"
-
-    job_id = f"train_{uuid.uuid4().hex[:10]}"
-    job = {
-        "id": job_id,
-        "mode": mode,
-        "status": "queued",
-        "progress": 0,
-        "message": "Queued",
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "base_model": base_model,
-        "epochs": int(payload.get("epochs", 30)),
-        "imgsz": int(payload.get("imgsz", 640)),
-        "batch": int(payload.get("batch", 8)),
-        "device": resolve_training_device(payload.get("device", "auto")),
-        "annotated_images": readiness["annotated_images"],
-        "total_images": readiness["total_images"],
-        "split_config": split_config,
-        "split_counts": {},
-        "log_path": os.path.join(PATHS['train_work'], job_id, "train.log"),
-        "log_tail": "",
-        "results_csv": "",
-        "results_png": "",
-        "weights_path": "",
-        "run_dir": "",
-        "epoch": 0,
-        "total_epochs": int(payload.get("epochs", 30)),
-    }
     upsert_train_job(job)
-
-    t = threading.Thread(target=run_training_job, args=(job_id, current_app.root_path), daemon=True)
+    t = threading.Thread(target=run_training_job, args=(job["id"], current_app.root_path), daemon=True)
     t.start()
     return jsonify({"message": "training started", "job": job})

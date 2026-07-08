@@ -4,19 +4,19 @@ import os
 import shutil
 import uuid
 
-from flask import Blueprint, jsonify, request, send_from_directory
+from flask import Blueprint, Response, jsonify, request, send_from_directory
 
 from app.common.config import PATHS
 from app.common.json_store import read_json_file, write_json_file
 from app.common.utils import color_for_index, now_iso
 from app.services.models_service import (
-    append_model_registry_record,
+    append_record,
     get_active_model,
     get_models_dir,
     get_models_install_path,
     next_model_version,
     read_model_registry,
-    set_active_model,
+    set_active,
     write_model_registry,
 )
 
@@ -57,83 +57,10 @@ def check_yolo11_install():
 @bp.route('/api/download-models')
 def download_models():
     """Download YOLO models with SSE progress updates."""
-    import os
-    import subprocess
-    import time
-    from flask import Response
-
     models_str = request.args.get('models', '')
     models = [m.strip() for m in models_str.split(',') if m.strip()]
-    install_path = request.args.get('install_path', 'plugins/yolo11')
-
-    if not os.path.isabs(install_path):
-        install_path = os.path.join(PATHS['root'], install_path)
-
-    def sse(payload: dict) -> str:
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-    def generate():
-        yield sse({'status': 'started', 'message': 'Starting model download...', 'progress': 0})
-        time.sleep(0.2)
-
-        try:
-            if not os.path.exists(install_path) or not os.path.isdir(install_path):
-                yield sse({'status': 'error', 'message': 'YOLO11 is not installed', 'progress': 0})
-                return
-
-            if not models:
-                yield sse({'status': 'error', 'message': 'No model selected', 'progress': 0})
-                return
-
-            # Prefer plugin venv; fallback to current Python runtime.
-            if os.name == 'nt':
-                plugin_python = os.path.join(install_path, 'venv', 'Scripts', 'python.exe')
-            else:
-                plugin_python = os.path.join(install_path, 'venv', 'bin', 'python')
-
-            if os.path.exists(plugin_python):
-                python_path = plugin_python
-            else:
-                python_path = sys.executable
-                yield sse({'message': 'plugins/yolo11/venv not found, fallback to current Python runtime', 'progress': 5})
-
-            models_dir = os.path.join(install_path, 'models')
-            os.makedirs(models_dir, exist_ok=True)
-
-            total_models = len(models)
-            for i, model in enumerate(models):
-                progress = int((i / total_models) * 80) + 10
-                yield sse({'message': f'Downloading model: {model}...', 'progress': progress})
-
-                result = subprocess.run(
-                    [python_path, '-c', f'from ultralytics import YOLO; YOLO("{model}.pt")'],
-                    capture_output=True,
-                    text=True,
-                    cwd=models_dir,
-                    encoding='utf-8',
-                    errors='ignore',
-                    timeout=900,
-                )
-
-                if result.returncode != 0:
-                    err = (result.stderr or '').strip()[:500]
-                    yield sse({'status': 'error', 'message': f'Failed to download {model}: {err}', 'progress': 0})
-                    return
-
-                time.sleep(0.2)
-
-            yield sse({'message': 'Model download completed', 'progress': 100, 'status': 'completed'})
-
-        except FileNotFoundError as e:
-            yield sse({'status': 'error', 'message': f'File not found: {e.filename or str(e)}', 'progress': 0})
-        except (GeneratorExit, BrokenPipeError, ConnectionResetError):
-            # EventSource client disconnected. This is normal.
-            return
-        except Exception as e:
-            import traceback
-            yield sse({'status': 'error', 'message': f'Download failed: {str(e)}', 'progress': 0, 'traceback': traceback.format_exc()})
-
-    return Response(generate(), mimetype='text/event-stream')
+    install_path = models_service.resolve_install_path(request.args.get('install_path', 'plugins/yolo11'))
+    return Response(models_service.stream_model_download(models, install_path), mimetype='text/event-stream')
 
 
 @bp.route('/api/list-models')
@@ -166,76 +93,27 @@ def list_models():
 @bp.route('/api/upload-model', methods=['POST'])
 def upload_model():
     """上传YOLO11模型文件"""
-    import os
-    
-    # 获取安装路径
-    install_path = request.headers.get('X-Install-Path', 'plugins/yolo11')
-    # 确保安装路径是相对于项目根目录的
-    if not os.path.isabs(install_path):
-        install_path = os.path.join(PATHS['root'], install_path)
-    
-    # 检查YOLO11是否安装
+    install_path = models_service.resolve_install_path(request.headers.get('X-Install-Path', 'plugins/yolo11'))
     if not os.path.exists(install_path) or not os.path.isdir(install_path):
         return jsonify({'success': False, 'error': 'YOLO11未安装'})
-    
-    # 检查是否有文件上传
     if 'files[]' not in request.files:
         return jsonify({'success': False, 'error': '未找到上传的文件'})
-    
-    # 创建models目录
-    models_dir = os.path.join(install_path, 'models')
-    os.makedirs(models_dir, exist_ok=True)
-    
-    # 保存上传的文件
-    uploaded_files = []
-    files = request.files.getlist('files[]')
-    for file in files:
-        if file.filename != '' and file.filename.endswith('.pt'):
-            # 保存文件到models目录
-            file_path = os.path.join(models_dir, file.filename)
-            file.save(file_path)
-            uploaded_files.append(file.filename)
-    
-    return jsonify({'success': True, 'uploaded_files': uploaded_files})
+    files = [(f.filename or '', f.read()) for f in request.files.getlist('files[]')]
+    uploaded = models_service.save_uploaded_models(install_path, files)
+    return jsonify({'success': True, 'uploaded_files': uploaded})
 
 
 @bp.route('/api/delete-model', methods=['POST'])
 def delete_model():
     """删除YOLO11模型文件"""
-    import os
-    
-    # 获取安装路径
-    install_path = request.headers.get('X-Install-Path', 'plugins/yolo11')
-    # 确保安装路径是相对于项目根目录的
-    if not os.path.isabs(install_path):
-        install_path = os.path.join(PATHS['root'], install_path)
-    
-    # 获取模型名称
-    data = request.json or {}
-    model_name = data.get('model_name', '')
-    
-    # 检查YOLO11是否安装
+    install_path = models_service.resolve_install_path(request.headers.get('X-Install-Path', 'plugins/yolo11'))
     if not os.path.exists(install_path) or not os.path.isdir(install_path):
         return jsonify({'success': False, 'error': 'YOLO11未安装'})
-    
-    # 检查模型名称是否为空
-    if not model_name:
-        return jsonify({'success': False, 'error': '模型名称不能为空'})
-    
-    # 构建模型文件路径
-    models_dir = os.path.join(install_path, 'models')
-    model_path = os.path.join(models_dir, model_name)
-    
-    # 检查模型文件是否存在
-    if not os.path.exists(model_path):
-        return jsonify({'success': False, 'error': '模型文件不存在'})
-    
-    try:
-        # 删除模型文件
-        os.remove(model_path)
-        return jsonify({'success': True, 'message': f'模型 {model_name} 删除成功'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': f'删除模型失败: {str(e)}'})
+    data = request.json or {}
+    success, message = models_service.delete_model_file(install_path, data.get('model_name', ''))
+    if success:
+        return jsonify({'success': True, 'message': message})
+    return jsonify({'success': False, 'error': message})
 
 
 @bp.route('/api/models/registry')
@@ -258,7 +136,7 @@ def model_activate(model_id):
         return jsonify({"error": "model not found"}), 404
     if not os.path.exists(model.get("path", "")):
         return jsonify({"error": "model file does not exist"}), 400
-    set_active_model(model_id=model["id"], model_name=model["name"], model_path=model["path"])
+    set_active(model_id=model["id"], model_name=model["name"], model_path=model["path"])
     for m in models:
         m["status"] = "candidate"
     model["status"] = "production"
