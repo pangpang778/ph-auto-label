@@ -139,7 +139,7 @@ def test_split_post_persists_profile_under_default_id(isolated_app):
 
 @pytest.mark.integration
 def test_train_start_incremental_persists_queued_job(isolated_app, tmp_path, monkeypatch):
-    monkeypatch.setattr(training_app, "run_training_job", lambda job_id, root_path=None: None)
+    monkeypatch.setattr("app.blueprints.training.run_training_job", lambda job_id, root_path=None: None)
 
     response = isolated_app.test_client().post(
         "/api/train/start",
@@ -175,7 +175,7 @@ def test_train_start_incremental_persists_queued_job(isolated_app, tmp_path, mon
 
 @pytest.mark.integration
 def test_train_start_rejects_initial_mode_below_readiness_gate(isolated_app, monkeypatch):
-    monkeypatch.setattr(training_app, "run_training_job", lambda job_id, root_path=None: None)
+    monkeypatch.setattr("app.blueprints.training.run_training_job", lambda job_id, root_path=None: None)
 
     response = isolated_app.test_client().post(
         "/api/train/start",
@@ -199,7 +199,7 @@ def test_train_start_rejects_initial_mode_below_readiness_gate(isolated_app, mon
 
 @pytest.mark.integration
 def test_train_jobs_returns_jobs_envelope_sorted_desc(isolated_app, monkeypatch):
-    monkeypatch.setattr(training_app, "run_training_job", lambda job_id, root_path=None: None)
+    monkeypatch.setattr("app.blueprints.training.run_training_job", lambda job_id, root_path=None: None)
 
     client = isolated_app.test_client()
     client.post("/api/train/start", json={"mode": "incremental"})

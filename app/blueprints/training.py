@@ -1,0 +1,244 @@
+"""Training blueprint: /api/train/* routes."""
+import json
+import os
+import threading
+import uuid
+
+from flask import Blueprint, current_app, jsonify, request, send_file, send_from_directory
+
+from app.common.config import PATHS
+from app.common.json_store import read_json_file, write_json_file
+from app.common.utils import color_for_index, now_iso
+from app.repositories.train_jobs_repo import read_train_jobs, upsert_train_job, write_train_jobs
+from app.repositories.training_splits_repo import TRAINING_SPLITS_LOCK
+from app.services import models_service
+from app.services.training_service import (
+    _artifact_allowed_roots,
+    _extract_metrics_from_results_csv,
+    append_train_log,
+    build_split_summary,
+    build_yolo_training_dataset,
+    load_split_profile,
+    normalize_split_config,
+    resolve_training_device,
+    run_training_job,
+    save_split_profile,
+    split_counts,
+    training_readiness,
+)
+from training_artifacts import (
+    ARTIFACT_CONTENT_TYPES,
+    list_native_images,
+    read_log_tail,
+    read_training_metrics_series,
+    resolve_artifact,
+    resolve_native_image,
+)
+
+bp = Blueprint("training", __name__)
+
+
+@bp.route('/api/train/readiness')
+def train_readiness():
+    return jsonify(training_readiness())
+
+
+@bp.route('/api/train/split')
+def train_split_get():
+    profile_id = request.args.get("profile_id", "default")
+    split_config = load_split_profile(profile_id) or {"profile_id": profile_id}
+    return jsonify(build_split_summary(split_config))
+
+
+@bp.route('/api/train/split', methods=['POST'])
+def train_split_save():
+    payload = request.json or {}
+    try:
+        return jsonify(save_split_profile(payload.get("split_config") or payload))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@bp.route('/api/train/split/reset', methods=['POST'])
+def train_split_reset():
+    payload = request.json or {}
+    profile_id = str(payload.get("profile_id") or "default")
+    with TRAINING_SPLITS_LOCK:
+        profiles = read_json_file(PATHS['training_splits'], {})
+        profiles.pop(profile_id, None)
+        write_json_file(PATHS['training_splits'], profiles)
+    return jsonify(build_split_summary({"profile_id": profile_id}))
+
+
+@bp.route('/api/train/jobs')
+def train_jobs():
+    jobs = read_train_jobs()
+    jobs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return jsonify({"jobs": jobs})
+
+
+@bp.route('/api/train/jobs/<job_id>')
+def train_job_detail(job_id):
+    jobs = read_train_jobs()
+    job = next((x for x in jobs if x.get("id") == job_id), None)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(job)
+
+
+def _get_train_job_or_404(job_id: str):
+    job = next((x for x in read_train_jobs() if x.get("id") == job_id), None)
+    if not job:
+        return None, (jsonify({"error": "job not found"}), 404)
+    return job, None
+
+
+@bp.route('/api/train/jobs/<job_id>/logs')
+def train_job_logs(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        max_lines = int(request.args.get("tail", 200))
+        path = resolve_artifact(job, "log", _artifact_allowed_roots())
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return jsonify({"job_id": job_id, "log": read_log_tail(path, max_lines), "tail": max_lines})
+
+
+@bp.route('/api/train/jobs/<job_id>/metrics')
+def train_job_metrics(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_artifact(job, "results_csv", _artifact_allowed_roots())
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return jsonify(read_training_metrics_series(path))
+
+
+@bp.route('/api/train/jobs/<job_id>/results-image')
+def train_job_results_image(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_artifact(job, "results_png", _artifact_allowed_roots())
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except (PermissionError, ValueError):
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return send_file(path, mimetype="image/png")
+
+
+@bp.route('/api/train/jobs/<job_id>/native-images')
+def train_job_native_images(job_id):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    return jsonify({"job_id": job_id, "images": list_native_images(job, _artifact_allowed_roots())})
+
+
+@bp.route('/api/train/jobs/<job_id>/native-images/<image_name>')
+def train_job_native_image(job_id, image_name):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_native_image(job, image_name, _artifact_allowed_roots())
+    except ValueError:
+        return jsonify({"error": "unsupported image"}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "image not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "image is not allowed"}), 403
+    mimetype = "image/jpeg" if image_name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    return send_file(path, mimetype=mimetype)
+
+
+@bp.route('/api/train/jobs/<job_id>/download/<artifact>')
+def train_job_download(job_id, artifact):
+    job, error = _get_train_job_or_404(job_id)
+    if error:
+        return error
+    try:
+        path = resolve_artifact(job, artifact, _artifact_allowed_roots())
+    except ValueError:
+        return jsonify({"error": "unsupported artifact"}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "artifact not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "artifact is not allowed"}), 403
+    return send_file(
+        path,
+        mimetype=ARTIFACT_CONTENT_TYPES.get(artifact, "application/octet-stream"),
+        as_attachment=True,
+        download_name=os.path.basename(path),
+    )
+
+
+@bp.route('/api/train/start', methods=['POST'])
+def train_start():
+    payload = request.json or {}
+    mode = str(payload.get("mode", "initial")).strip().lower()
+    if mode not in {"initial", "incremental"}:
+        mode = "incremental"
+
+    readiness = training_readiness()
+    if mode == "initial" and not readiness.get("ready_for_initial"):
+        return jsonify({"error": f"Need at least {readiness['min_for_initial']} annotated images for initial training", "readiness": readiness}), 400
+
+    active = models_service.get_active_model()
+    try:
+        if payload.get("split_config"):
+            split_config = normalize_split_config(payload.get("split_config"))
+        else:
+            split_config = load_split_profile(str(payload.get("split_profile_id") or "default"))
+            split_config = normalize_split_config(split_config or {"profile_id": str(payload.get("split_profile_id") or "default")})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    base_model = payload.get("base_model")
+    if not base_model:
+        if mode == "incremental" and active.get("model_path") and os.path.exists(active.get("model_path")):
+            base_model = active.get("model_path")
+        else:
+            base_model = "yolo11n.pt"
+
+    job_id = f"train_{uuid.uuid4().hex[:10]}"
+    job = {
+        "id": job_id,
+        "mode": mode,
+        "status": "queued",
+        "progress": 0,
+        "message": "Queued",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "base_model": base_model,
+        "epochs": int(payload.get("epochs", 30)),
+        "imgsz": int(payload.get("imgsz", 640)),
+        "batch": int(payload.get("batch", 8)),
+        "device": resolve_training_device(payload.get("device", "auto")),
+        "annotated_images": readiness["annotated_images"],
+        "total_images": readiness["total_images"],
+        "split_config": split_config,
+        "split_counts": {},
+        "log_path": os.path.join(PATHS['train_work'], job_id, "train.log"),
+        "log_tail": "",
+        "results_csv": "",
+        "results_png": "",
+        "weights_path": "",
+        "run_dir": "",
+        "epoch": 0,
+        "total_epochs": int(payload.get("epochs", 30)),
+    }
+    upsert_train_job(job)
+
+    t = threading.Thread(target=run_training_job, args=(job_id, current_app.root_path), daemon=True)
+    t.start()
+    return jsonify({"message": "training started", "job": job})

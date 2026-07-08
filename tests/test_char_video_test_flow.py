@@ -45,8 +45,7 @@ def _patch_video_externals(monkeypatch, job_id="job-xyz"):
     )
     # Only "fake.mp4" resolves; any other name is treated as unknown (None).
     monkeypatch.setattr(
-        training_app,
-        "resolve_video_path",
+        "app.blueprints.video_test.resolve_video_path",
         lambda name: "/tmp/fake.mp4" if name == "fake.mp4" else None,
     )
 
