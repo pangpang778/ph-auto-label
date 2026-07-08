@@ -15,7 +15,7 @@ import cv2
 import sys
 from urllib.parse import urlparse
 from io import StringIO
-from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response, current_app
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 from PIL import Image
@@ -37,104 +37,82 @@ from training_artifacts import (
     resolve_native_image,
 )
 
-app = Flask(__name__)
+from app.common.config import PATHS, VIDEO_EXTENSIONS
+from app.common.json_store import read_json_file, write_json_file
+from app.common.utils import now_iso, color_for_index
+from app.repositories.train_jobs_repo import TRAIN_JOBS_LOCK, read_train_jobs, write_train_jobs, upsert_train_job
+from app.repositories.training_splits_repo import TRAINING_SPLITS_LOCK, read_training_splits, write_training_splits, load_split_profile
+from app.repositories.model_registry_repo import MODEL_REGISTRY_LOCK, read_model_registry, write_model_registry, append_model_registry_record, get_active_model, set_active_model, get_models_install_path, get_models_dir
+from app.services.models_service import next_model_version, _latest_version_tag
+from app.services.training_service import (
+    training_readiness, get_cuda_status, normalize_split_config,
+    _image_matches_class_filter, collect_training_candidates, assign_training_splits,
+    split_counts, build_split_summary, save_split_profile, append_train_log,
+    _annotation_to_bbox, build_yolo_training_dataset, _extract_metrics_from_results_csv,
+    resolve_training_device, run_training_job, _artifact_allowed_roots,
+)
+from app.repositories.annotation_repo import read_annotations, write_annotations, read_classes, write_classes
+from app.repositories.timeline_repo import read_timelines, write_timelines, read_scenario, write_scenario
+
+# repo root (app/ package dir's parent); templates/static live there.
+# Flask(__name__) would otherwise set root_path to app/, breaking lookups.
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+app = Flask(__name__, template_folder=os.path.join(_APP_ROOT, 'templates'),
+            static_folder=os.path.join(_APP_ROOT, 'static'))
 CORS(app)
 
 # 配置
-UPLOAD_FOLDER = 'uploads'
-STATIC_FOLDER = 'static'
-ANNOTATIONS_FOLDER = os.path.join(STATIC_FOLDER, 'annotations')
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['STATIC_FOLDER'] = STATIC_FOLDER
-app.config['ANNOTATIONS_FOLDER'] = ANNOTATIONS_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 最大上传2GB
 
 # 创建必要的目录
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(STATIC_FOLDER, exist_ok=True)
-os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
+os.makedirs(PATHS['uploads'], exist_ok=True)
+os.makedirs(os.path.dirname(PATHS['annotations']), exist_ok=True)
 
-# 模拟数据库存储标注信息
-ANNOTATIONS_FILE = os.path.join(ANNOTATIONS_FOLDER, 'annotations.json')
-CLASSES_FILE = os.path.join(ANNOTATIONS_FOLDER, 'classes.json')
-TIMELINES_FILE = os.path.join(ANNOTATIONS_FOLDER, 'timelines.json')
-SCENARIO_FILE = os.path.join(ANNOTATIONS_FOLDER, 'sop_scenario.json')
-TRAIN_JOBS_FILE = os.path.join(ANNOTATIONS_FOLDER, 'train_jobs.json')
-MODEL_REGISTRY_FILE = os.path.join(ANNOTATIONS_FOLDER, 'model_registry.json')
-ACTIVE_MODEL_FILE = os.path.join(ANNOTATIONS_FOLDER, 'active_model.json')
-TRAINING_SPLITS_FILE = os.path.join(ANNOTATIONS_FOLDER, 'training_splits.json')
-TRAIN_JOBS_LOCK = threading.Lock()
-TRAINING_SPLITS_LOCK = threading.Lock()
-MODEL_REGISTRY_LOCK = threading.Lock()
-VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v')
+# Domain locks live in app/repositories/*_repo.py.
 
 # 初始化注释文件
-if not os.path.exists(ANNOTATIONS_FILE):
-    with open(ANNOTATIONS_FILE, 'w') as f:
+if not os.path.exists(PATHS['annotations']):
+    with open(PATHS['annotations'], 'w') as f:
         json.dump({}, f)
         
 # 初始化类别文件
-if not os.path.exists(CLASSES_FILE):
+if not os.path.exists(PATHS['classes']):
     # 默认类别
     default_classes = [
         {'name': 'person', 'color': '#3aa757'},
         {'name': 'car', 'color': '#4c9ffd'},
         {'name': 'animal', 'color': '#ff9d00'}
     ]
-    with open(CLASSES_FILE, 'w') as f:
+    with open(PATHS['classes'], 'w') as f:
         json.dump(default_classes, f)
 
-if not os.path.exists(TIMELINES_FILE):
-    with open(TIMELINES_FILE, 'w', encoding='utf-8') as f:
+if not os.path.exists(PATHS['timelines']):
+    with open(PATHS['timelines'], 'w', encoding='utf-8') as f:
         json.dump({}, f, ensure_ascii=False, indent=2)
 
-if not os.path.exists(SCENARIO_FILE):
-    with open(SCENARIO_FILE, 'w', encoding='utf-8') as f:
+if not os.path.exists(PATHS['scenario']):
+    with open(PATHS['scenario'], 'w', encoding='utf-8') as f:
         json.dump({"scenario_id": "", "name": "", "steps": [], "object_classes": [], "action_labels": []}, f, ensure_ascii=False, indent=2)
 
-if not os.path.exists(TRAIN_JOBS_FILE):
-    with open(TRAIN_JOBS_FILE, 'w', encoding='utf-8') as f:
+if not os.path.exists(PATHS['train_jobs']):
+    with open(PATHS['train_jobs'], 'w', encoding='utf-8') as f:
         json.dump([], f, ensure_ascii=False, indent=2)
 
-if not os.path.exists(MODEL_REGISTRY_FILE):
-    with open(MODEL_REGISTRY_FILE, 'w', encoding='utf-8') as f:
+if not os.path.exists(PATHS['model_registry']):
+    with open(PATHS['model_registry'], 'w', encoding='utf-8') as f:
         json.dump([], f, ensure_ascii=False, indent=2)
 
-if not os.path.exists(ACTIVE_MODEL_FILE):
-    with open(ACTIVE_MODEL_FILE, 'w', encoding='utf-8') as f:
+if not os.path.exists(PATHS['active_model']):
+    with open(PATHS['active_model'], 'w', encoding='utf-8') as f:
         json.dump({"model_id": "", "model_name": "", "model_path": ""}, f, ensure_ascii=False, indent=2)
 
-if not os.path.exists(TRAINING_SPLITS_FILE):
-    with open(TRAINING_SPLITS_FILE, 'w', encoding='utf-8') as f:
+if not os.path.exists(PATHS['training_splits']):
+    with open(PATHS['training_splits'], 'w', encoding='utf-8') as f:
         json.dump({}, f, ensure_ascii=False, indent=2)
-
-
-def read_json_file(path, default):
-    try:
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8-sig') as f:
-                content = f.read().strip()
-                return json.loads(content) if content else default
-    except Exception as exc:
-        print(f"Failed to read JSON {path}: {exc}")
-    return default
-
-
-def write_json_file(path, data):
-    temp_path = path + '.tmp'
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(temp_path, path)
-
-
-def color_for_index(index):
-    palette = ['#3aa757', '#4c9ffd', '#ff9d00', '#dc3545', '#6f42c1', '#20c997', '#fd7e14', '#17a2b8', '#e83e8c', '#6610f2']
-    return palette[index % len(palette)]
 
 
 def sync_object_classes_to_labels(object_classes, replace=False):
-    classes = [] if replace else read_json_file(CLASSES_FILE, [])
+    classes = [] if replace else read_classes()
     existing = {c.get('name') for c in classes}
     for index, obj in enumerate(object_classes):
         name = obj.get('id') or obj.get('name') if isinstance(obj, dict) else str(obj)
@@ -142,7 +120,7 @@ def sync_object_classes_to_labels(object_classes, replace=False):
         if name and name not in existing:
             classes.append({'name': name, 'display_name': display_name, 'color': color_for_index(len(classes))})
             existing.add(name)
-    write_json_file(CLASSES_FILE, classes)
+    write_classes(classes)
     return classes
 
 
@@ -246,575 +224,6 @@ def parse_sop_scenario(scenario_dir):
     }
 
 
-def now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec='seconds') + "Z"
-
-
-def get_models_install_path() -> str:
-    install_path = os.path.join(app.root_path, 'plugins', 'yolo11')
-    if not os.path.exists(install_path):
-        os.makedirs(install_path, exist_ok=True)
-    return install_path
-
-
-def get_models_dir() -> str:
-    models_dir = os.path.join(get_models_install_path(), 'models')
-    os.makedirs(models_dir, exist_ok=True)
-    return models_dir
-
-
-def read_train_jobs() -> list[dict]:
-    with TRAIN_JOBS_LOCK:
-        return read_json_file(TRAIN_JOBS_FILE, [])
-
-
-def write_train_jobs(jobs: list[dict]) -> None:
-    with TRAIN_JOBS_LOCK:
-        write_json_file(TRAIN_JOBS_FILE, jobs)
-
-
-def upsert_train_job(job: dict) -> None:
-    with TRAIN_JOBS_LOCK:
-        jobs = read_json_file(TRAIN_JOBS_FILE, [])
-        for i, old in enumerate(jobs):
-            if old.get("id") == job.get("id"):
-                jobs[i] = job
-                write_json_file(TRAIN_JOBS_FILE, jobs)
-                return
-        jobs.append(job)
-        write_json_file(TRAIN_JOBS_FILE, jobs)
-
-
-def read_model_registry() -> list[dict]:
-    with MODEL_REGISTRY_LOCK:
-        return read_json_file(MODEL_REGISTRY_FILE, [])
-
-
-def write_model_registry(models: list[dict]) -> None:
-    with MODEL_REGISTRY_LOCK:
-        write_json_file(MODEL_REGISTRY_FILE, models)
-
-
-def append_model_registry_record(model_record: dict) -> None:
-    with MODEL_REGISTRY_LOCK:
-        models = read_json_file(MODEL_REGISTRY_FILE, [])
-        models.append(model_record)
-        write_json_file(MODEL_REGISTRY_FILE, models)
-
-
-def get_active_model() -> dict:
-    return read_json_file(ACTIVE_MODEL_FILE, {"model_id": "", "model_name": "", "model_path": ""})
-
-
-def set_active_model(model_id: str, model_name: str, model_path: str) -> None:
-    write_json_file(ACTIVE_MODEL_FILE, {"model_id": model_id, "model_name": model_name, "model_path": model_path, "updated_at": now_iso()})
-
-
-def training_readiness() -> dict:
-    annotations = read_json_file(ANNOTATIONS_FILE, {})
-    total_images = 0
-    annotated_images = 0
-    valid_suffix = ('.png', '.jpg', '.jpeg', '.bmp')
-    for name in os.listdir(app.config['UPLOAD_FOLDER']):
-        if name.lower().endswith(valid_suffix):
-            total_images += 1
-            anns = annotations.get(name, [])
-            if anns:
-                annotated_images += 1
-    return {
-        "total_images": total_images,
-        "annotated_images": annotated_images,
-        "min_for_initial": 20,
-        "ready_for_initial": annotated_images >= 20,
-        "cuda": get_cuda_status(),
-    }
-
-
-def get_cuda_status() -> dict:
-    """Return CUDA availability for the current Flask runtime environment."""
-    status = {
-        "available": False,
-        "device_count": 0,
-        "device_name": "",
-        "torch_version": "",
-        "error": "",
-    }
-    try:
-        import torch
-
-        status["torch_version"] = str(getattr(torch, "__version__", ""))
-        status["available"] = bool(torch.cuda.is_available())
-        status["device_count"] = int(torch.cuda.device_count() if status["available"] else 0)
-        if status["available"] and status["device_count"] > 0:
-            status["device_name"] = str(torch.cuda.get_device_name(0))
-    except Exception as exc:
-        status["error"] = str(exc)
-    return status
-
-
-def read_training_splits() -> dict:
-    with TRAINING_SPLITS_LOCK:
-        return read_json_file(TRAINING_SPLITS_FILE, {})
-
-
-def write_training_splits(data: dict) -> None:
-    with TRAINING_SPLITS_LOCK:
-        write_json_file(TRAINING_SPLITS_FILE, data)
-
-
-def normalize_split_config(raw: dict | None) -> dict:
-    raw = raw or {}
-    train_ratio = float(raw.get("train_ratio", 0.8))
-    val_ratio = float(raw.get("val_ratio", 0.15))
-    test_ratio = float(raw.get("test_ratio", 0.05))
-    total = train_ratio + val_ratio + test_ratio
-    if abs(total - 100.0) <= 0.01:
-        train_ratio /= 100.0
-        val_ratio /= 100.0
-        test_ratio /= 100.0
-        total = train_ratio + val_ratio + test_ratio
-    if min(train_ratio, val_ratio, test_ratio) <= 0 or abs(total - 1.0) > 0.001:
-        raise ValueError("train_ratio, val_ratio and test_ratio must be positive and sum to 1.0 or 100")
-
-    class_filter = raw.get("class_filter") or raw.get("selected_classes") or []
-    if isinstance(class_filter, str):
-        class_filter = [x.strip() for x in class_filter.replace("，", ",").split(",") if x.strip()]
-    else:
-        class_filter = [str(x).strip() for x in class_filter if str(x).strip()]
-
-    assignments = raw.get("assignments") if isinstance(raw.get("assignments"), dict) else {}
-    normalized_assignments = {}
-    for split in ("train", "val", "test"):
-        names = assignments.get(split, []) if assignments else []
-        normalized_assignments[split] = [str(name) for name in names if str(name)]
-
-    return {
-        "profile_id": str(raw.get("profile_id") or "default"),
-        "train_ratio": train_ratio,
-        "val_ratio": val_ratio,
-        "test_ratio": test_ratio,
-        "sample_filter": str(raw.get("sample_filter") or "annotated"),
-        "class_filter": class_filter,
-        "assignments": normalized_assignments,
-    }
-
-
-def _image_matches_class_filter(image_name: str, annotations: dict, class_filter: list[str]) -> bool:
-    if not class_filter:
-        return True
-    selected = set(class_filter)
-    return any(ann.get("class") in selected for ann in annotations.get(image_name, []))
-
-
-def collect_training_candidates(split_config: dict | None = None) -> dict:
-    config = normalize_split_config(split_config)
-    classes = read_json_file(CLASSES_FILE, [])
-    class_names = [c.get('name') for c in classes if c.get('name')]
-    annotations = read_json_file(ANNOTATIONS_FILE, {})
-    image_names = sorted(name for name in os.listdir(app.config['UPLOAD_FOLDER']) if name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')))
-    annotated = [name for name in image_names if annotations.get(name)]
-    filtered = [name for name in annotated if _image_matches_class_filter(name, annotations, config["class_filter"])]
-    unannotated = [name for name in image_names if not annotations.get(name)]
-    return {
-        "class_names": class_names,
-        "image_names": image_names,
-        "annotations": annotations,
-        "annotated": annotated,
-        "candidates": filtered,
-        "unannotated": unannotated,
-        "config": config,
-    }
-
-
-def assign_training_splits(candidates: list[str], split_config: dict | None = None, legacy: bool = False) -> dict:
-    if legacy:
-        annotated = list(candidates)
-        random.Random(42).shuffle(annotated)
-        n = len(annotated)
-        n_train = max(1, int(n * 0.8))
-        n_val = max(1, int(n * 0.15))
-        train_set = annotated[:n_train]
-        val_set = annotated[n_train:n_train + n_val]
-        test_set = annotated[n_train + n_val:] or annotated[:1]
-        return {"train": train_set, "val": val_set, "test": test_set}
-
-    config = normalize_split_config(split_config)
-    candidate_set = set(candidates)
-    requested = config.get("assignments", {})
-    if any(requested.get(split) for split in ("train", "val", "test")):
-        assigned = {split: [name for name in requested.get(split, []) if name in candidate_set] for split in ("train", "val", "test")}
-        used = set(assigned["train"] + assigned["val"] + assigned["test"])
-        leftovers = [name for name in candidates if name not in used]
-        assigned["train"].extend(leftovers)
-        return assigned
-
-    shuffled = list(candidates)
-    random.Random(42).shuffle(shuffled)
-    n = len(shuffled)
-    n_train = max(1, int(n * config["train_ratio"]))
-    n_val = max(1, int(n * config["val_ratio"]))
-    if n_train + n_val >= n:
-        n_val = max(1, n - n_train - 1) if n > 2 else max(0, n - n_train)
-    return {
-        "train": shuffled[:n_train],
-        "val": shuffled[n_train:n_train + n_val],
-        "test": shuffled[n_train + n_val:] or shuffled[:1],
-    }
-
-
-def split_counts(splits: dict) -> dict:
-    return {split: len(splits.get(split, [])) for split in ("train", "val", "test")}
-
-
-def build_split_summary(split_config: dict | None = None, persist_assignments: bool = False) -> dict:
-    candidates = collect_training_candidates(split_config)
-    splits = assign_training_splits(candidates["candidates"], candidates["config"])
-    config = dict(candidates["config"])
-    if persist_assignments:
-        config["assignments"] = splits
-    return {
-        "split_config": config,
-        "counts": split_counts(splits),
-        "class_options": candidates["class_names"],
-        "candidate_totals": {
-            "total_images": len(candidates["image_names"]),
-            "annotated_images": len(candidates["annotated"]),
-            "candidate_images": len(candidates["candidates"]),
-            "unannotated_images": len(candidates["unannotated"]),
-        },
-        "updated_at": now_iso(),
-    }
-
-
-def load_split_profile(profile_id: str = "default") -> dict | None:
-    profiles = read_training_splits()
-    profile = profiles.get(profile_id)
-    return profile.get("split_config") if isinstance(profile, dict) else None
-
-
-def save_split_profile(split_config: dict) -> dict:
-    summary = build_split_summary(split_config, persist_assignments=True)
-    profile_id = summary["split_config"].get("profile_id") or "default"
-    with TRAINING_SPLITS_LOCK:
-        profiles = read_json_file(TRAINING_SPLITS_FILE, {})
-        profiles[profile_id] = summary
-        write_json_file(TRAINING_SPLITS_FILE, profiles)
-    return summary
-
-
-def append_train_log(job: dict, message: str) -> None:
-    log_path = job.get("log_path")
-    if not log_path:
-        return
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"[{now_iso()}] {message}\n")
-    job["log_tail"] = read_log_tail(log_path, 50)
-
-
-def _annotation_to_bbox(ann: dict, width: int, height: int):
-    points = ann.get('points', [])
-    if not points:
-        return None
-    valid_points = []
-    if isinstance(points, list):
-        if points and isinstance(points[0], dict):
-            for p in points:
-                if p.get('x') is not None and p.get('y') is not None:
-                    valid_points.append([float(p['x']), float(p['y'])])
-        else:
-            for p in points:
-                if isinstance(p, (list, tuple)) and len(p) >= 2 and p[0] is not None and p[1] is not None:
-                    valid_points.append([float(p[0]), float(p[1])])
-    if not valid_points:
-        return None
-    arr = np.array(valid_points, dtype=np.float32)
-    x_min, y_min = float(np.min(arr[:, 0])), float(np.min(arr[:, 1]))
-    x_max, y_max = float(np.max(arr[:, 0])), float(np.max(arr[:, 1]))
-    x_min = max(0.0, min(x_min, width))
-    y_min = max(0.0, min(y_min, height))
-    x_max = max(0.0, min(x_max, width))
-    y_max = max(0.0, min(y_max, height))
-    bw = x_max - x_min
-    bh = y_max - y_min
-    if bw <= 1e-6 or bh <= 1e-6:
-        return None
-    cx = (x_min + x_max) / 2.0 / max(width, 1)
-    cy = (y_min + y_max) / 2.0 / max(height, 1)
-    nw = bw / max(width, 1)
-    nh = bh / max(height, 1)
-    return cx, cy, nw, nh
-
-
-def build_yolo_training_dataset(work_dir: str, split_config: dict | None = None) -> dict:
-    candidates = collect_training_candidates(split_config)
-    class_names = candidates["class_names"]
-    if not class_names:
-        raise RuntimeError("No classes found. Please create labels first.")
-    class_to_id = {name: i for i, name in enumerate(class_names)}
-    annotations = candidates["annotations"]
-    training_images = candidates["annotated"] if split_config is None else candidates["candidates"]
-    if len(training_images) < 20:
-        raise RuntimeError("Need at least 20 annotated images before training.")
-
-    splits = assign_training_splits(training_images, candidates["config"], legacy=split_config is None)
-    dataset_root = os.path.join(work_dir, "dataset")
-    for split in splits.keys():
-        os.makedirs(os.path.join(dataset_root, split, "images"), exist_ok=True)
-        os.makedirs(os.path.join(dataset_root, split, "labels"), exist_ok=True)
-
-    for split, names in splits.items():
-        for image_name in names:
-            src = os.path.join(app.config['UPLOAD_FOLDER'], image_name)
-            dst = os.path.join(dataset_root, split, "images", image_name)
-            shutil.copy2(src, dst)
-
-            label_path = os.path.join(dataset_root, split, "labels", os.path.splitext(image_name)[0] + ".txt")
-            with Image.open(src) as img:
-                width, height = img.size
-
-            lines = []
-            for ann in annotations.get(image_name, []):
-                cls_name = ann.get("class")
-                if cls_name not in class_to_id:
-                    continue
-                box = _annotation_to_bbox(ann, width, height)
-                if not box:
-                    continue
-                cx, cy, nw, nh = box
-                lines.append(f"{class_to_id[cls_name]} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
-            with open(label_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-
-    data_yaml = os.path.join(dataset_root, "data.yaml")
-    with open(data_yaml, "w", encoding="utf-8") as f:
-        dataset_root_abs = os.path.abspath(dataset_root).replace("\\", "/")
-        f.write(f"path: {dataset_root_abs}\n")
-        f.write("train: train/images\n")
-        f.write("val: val/images\n")
-        f.write("test: test/images\n\n")
-        f.write(f"nc: {len(class_names)}\n")
-        f.write(f"names: {class_names}\n")
-
-    return {
-        "dataset_root": dataset_root,
-        "data_yaml": data_yaml,
-        "class_names": class_names,
-        "total_images": len(candidates["image_names"]),
-        "annotated_images": len(candidates["annotated"]),
-        "candidate_images": len(training_images),
-        "split_counts": split_counts(splits),
-        "split_config": candidates["config"],
-        "assignments": splits,
-    }
-
-
-def _latest_version_tag(models: list[dict]) -> tuple[int, int]:
-    major, minor = 0, 0
-    for m in models:
-        version = str(m.get("version", "")).lstrip("v")
-        parts = version.split(".")
-        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-            ma, mi = int(parts[0]), int(parts[1])
-            if (ma, mi) > (major, minor):
-                major, minor = ma, mi
-    return major, minor
-
-
-def next_model_version(mode: str) -> str:
-    models = read_model_registry()
-    ma, mi = _latest_version_tag(models)
-    if ma == 0 and mi == 0:
-        return "v1.0"
-    if mode == "initial":
-        return f"v{ma + 1}.0"
-    return f"v{ma}.{mi + 1}"
-
-
-def _extract_metrics_from_results_csv(results_csv: str) -> dict:
-    if not os.path.exists(results_csv):
-        return {}
-    metrics = {}
-    try:
-        with open(results_csv, "r", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
-        if not rows:
-            return {}
-        row = rows[-1]
-        for key, value in row.items():
-            try:
-                metrics[key.strip()] = float(value)
-            except Exception:
-                continue
-    except Exception:
-        return {}
-    return metrics
-
-
-def resolve_training_device(requested_device):
-    """Resolve train device from user input. Supports 'auto' -> CUDA if available."""
-    value = str(requested_device or "auto").strip().lower()
-    if value in {"", "auto", "default"}:
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return 0
-        except Exception:
-            pass
-        return "cpu"
-    return requested_device
-
-
-def run_training_job(job_id: str) -> None:
-    jobs = read_train_jobs()
-    job = next((x for x in jobs if x.get("id") == job_id), None)
-    if not job:
-        return
-    job_dir = os.path.join(app.root_path, "static", "train_work", job_id)
-    os.makedirs(job_dir, exist_ok=True)
-    job["log_path"] = os.path.join(job_dir, "train.log")
-    job["status"] = "running"
-    job["progress"] = 5
-    job["message"] = "Preparing training dataset..."
-    job["epoch"] = 0
-    job["total_epochs"] = int(job.get("epochs", 50))
-    job["updated_at"] = now_iso()
-    append_train_log(job, "Preparing training dataset...")
-    upsert_train_job(job)
-
-    try:
-        dataset = build_yolo_training_dataset(job_dir, job.get("split_config"))
-        job["dataset_dir"] = dataset["dataset_root"]
-        job["annotated_images"] = dataset["annotated_images"]
-        job["total_images"] = dataset["total_images"]
-        job["candidate_images"] = dataset["candidate_images"]
-        job["split_counts"] = dataset["split_counts"]
-        job["split_config"] = dataset["split_config"]
-        job["progress"] = 20
-        job["message"] = "Dataset prepared. Starting model training..."
-        job["updated_at"] = now_iso()
-        append_train_log(job, f"Dataset prepared with split counts: {dataset['split_counts']}")
-        upsert_train_job(job)
-
-        from ultralytics import YOLO
-
-        base_model = job.get("base_model") or "yolo11n.pt"
-        job["resolved_base_model"] = base_model
-        train_project = os.path.join(job_dir, "runs")
-        model = YOLO(base_model)
-        job["progress"] = 45
-        job["message"] = "Training in progress..."
-        job["updated_at"] = now_iso()
-        append_train_log(job, f"Training started: base_model={base_model}, device={job.get('device', 'cpu')}, epochs={job.get('epochs', 50)}")
-        upsert_train_job(job)
-
-        persist_state = {"last_time": 0.0, "last_epoch": 0}
-        total_epochs = int(job.get("epochs", 50))
-        persist_every = max(1, total_epochs // 50)
-
-        def on_train_epoch_end(trainer):
-            epoch = int(getattr(trainer, "epoch", 0) or 0) + 1
-            job["epoch"] = min(epoch, total_epochs)
-            job["total_epochs"] = total_epochs
-            job["progress"] = min(95, 25 + int((job["epoch"] / max(total_epochs, 1)) * 70))
-            job["message"] = f"Training epoch {job['epoch']}/{total_epochs}"
-            append_train_log(job, job["message"])
-            now = time.time()
-            if epoch % persist_every == 0 or now - persist_state["last_time"] >= 5:
-                job["updated_at"] = now_iso()
-                upsert_train_job(job)
-                persist_state["last_time"] = now
-                persist_state["last_epoch"] = epoch
-
-        try:
-            model.add_callback("on_train_epoch_end", on_train_epoch_end)
-        except Exception as callback_exc:
-            append_train_log(job, f"Epoch callback unavailable: {callback_exc}")
-
-        model.train(
-            data=dataset["data_yaml"],
-            epochs=int(job.get("epochs", 50)),
-            imgsz=int(job.get("imgsz", 640)),
-            batch=int(job.get("batch", 8)),
-            device=job.get("device", "cpu"),
-            workers=0,
-            project=train_project,
-            name="detector",
-            exist_ok=True,
-            patience=0,
-            pretrained=True,
-            verbose=True,
-            cache=False,
-            amp=False,
-        )
-        run_dir = os.path.join(train_project, "detector")
-        best_path = os.path.join(run_dir, "weights", "best.pt")
-        last_path = os.path.join(run_dir, "weights", "last.pt")
-        if os.path.exists(best_path):
-            trained_model = best_path
-        elif os.path.exists(last_path):
-            trained_model = last_path
-        else:
-            raise FileNotFoundError("Training finished but no model artifact found in weights/")
-
-        version = next_model_version(job.get("mode", "incremental"))
-        model_filename = f"{version}.pt"
-        model_dst = os.path.join(get_models_dir(), model_filename)
-        shutil.copy2(trained_model, model_dst)
-
-        results_csv = os.path.join(run_dir, "results.csv")
-        results_png = os.path.join(run_dir, "results.png")
-        metrics = _extract_metrics_from_results_csv(results_csv)
-        model_id = f"model_{uuid.uuid4().hex[:10]}"
-        model_record = {
-            "id": model_id,
-            "version": version,
-            "name": model_filename,
-            "path": model_dst,
-            "parent_model": job.get("base_model", ""),
-            "mode": job.get("mode", "incremental"),
-            "metrics": metrics,
-            "created_at": now_iso(),
-            "job_id": job_id,
-            "status": "candidate",
-            "results_csv": results_csv if os.path.exists(results_csv) else "",
-            "results_png": results_png if os.path.exists(results_png) else "",
-            "weights_path": trained_model,
-            "run_dir": run_dir,
-            "split_counts": job.get("split_counts", {}),
-        }
-        append_model_registry_record(model_record)
-
-        # auto activate newest successful model
-        set_active_model(model_id=model_id, model_name=model_filename, model_path=model_dst)
-
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["message"] = f"Training completed. Model {model_filename} is ready."
-        job["artifact_path"] = model_dst
-        job["weights_path"] = trained_model
-        job["metrics"] = metrics
-        job["model_id"] = model_id
-        job["version"] = version
-        job["run_dir"] = run_dir
-        job["results_csv"] = results_csv if os.path.exists(results_csv) else ""
-        job["results_png"] = results_png if os.path.exists(results_png) else ""
-        job["epoch"] = int(job.get("epochs", 50))
-        job["total_epochs"] = int(job.get("epochs", 50))
-        job["updated_at"] = now_iso()
-        append_train_log(job, f"Training completed. Model {model_filename} is ready.")
-        upsert_train_job(job)
-
-    except Exception as exc:
-        job["status"] = "failed"
-        job["progress"] = 100
-        job["message"] = f"Training failed: {str(exc)}"
-        job["error"] = traceback.format_exc()
-        job["updated_at"] = now_iso()
-        append_train_log(job, job["message"])
-        upsert_train_job(job)
-
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -824,8 +233,8 @@ def index():
 def get_classes():
     """获取所有类别"""
     classes = []
-    if os.path.exists(CLASSES_FILE):
-        with open(CLASSES_FILE, 'r') as f:
+    if os.path.exists(PATHS['classes']):
+        with open(PATHS['classes'], 'r') as f:
             classes = json.load(f)
     return jsonify(classes)
 
@@ -835,7 +244,7 @@ def save_classes():
     """保存所有类别"""
     data = request.json
     
-    with open(CLASSES_FILE, 'w') as f:
+    with open(PATHS['classes'], 'w') as f:
         json.dump(data, f, indent=2)
     
     return jsonify({'message': 'Classes saved successfully'})
@@ -848,9 +257,9 @@ def get_images():
     
     # 读取标注信息，用于获取每张图片的标注数量
     annotations = {}
-    if os.path.exists(ANNOTATIONS_FILE):
+    if os.path.exists(PATHS['annotations']):
         try:
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+            with open(PATHS['annotations'], 'r', encoding='utf-8') as f:
                 annotations = json.load(f)
             print(f"[DEBUG] 成功读取标注文件，共有 {len(annotations)} 张图片有标注")
         except json.JSONDecodeError as e:
@@ -862,13 +271,13 @@ def get_images():
             print(f"[ERROR] 读取标注文件失败: {e}")
             annotations = {}
     else:
-        print(f"[DEBUG] 标注文件不存在: {ANNOTATIONS_FILE}")
+        print(f"[DEBUG] 标注文件不存在: {PATHS['annotations']}")
     
-    for filename in os.listdir(app.config['UPLOAD_FOLDER']):
+    for filename in os.listdir(PATHS['uploads']):
         if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
             # 获取图片尺寸信息
             try:
-                image_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                image_path = os.path.join(PATHS['uploads'], filename)
                 with Image.open(image_path) as img:
                     width, height = img.size
             except Exception:
@@ -903,20 +312,20 @@ def delete_images():
     for image_name in image_names:
         try:
             # 删除图片文件
-            image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_name)
+            image_path = os.path.join(PATHS['uploads'], image_name)
             if os.path.exists(image_path):
                 os.remove(image_path)
                 deleted_count += 1
                 
                 # 同时删除对应的标注信息
                 annotations = {}
-                if os.path.exists(ANNOTATIONS_FILE):
-                    with open(ANNOTATIONS_FILE, 'r') as f:
+                if os.path.exists(PATHS['annotations']):
+                    with open(PATHS['annotations'], 'r') as f:
                         annotations = json.load(f)
                     
                     if image_name in annotations:
                         del annotations[image_name]
-                        with open(ANNOTATIONS_FILE, 'w') as f:
+                        with open(PATHS['annotations'], 'w') as f:
                             json.dump(annotations, f, indent=2)
             else:
                 errors.append(f"图片 '{image_name}' 不存在")
@@ -939,7 +348,7 @@ def delete_images():
 @app.route('/api/image/<filename>')
 def get_image(filename):
     """获取指定图片"""
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    return send_from_directory(PATHS['uploads'], filename)
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -953,7 +362,7 @@ def upload_folder():
     
     for file in files:
         if file.filename != '':
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename or '')
+            filepath = os.path.join(PATHS['uploads'], file.filename or '')
             file.save(filepath)
             uploaded_files.append(file.filename or '')
     
@@ -973,13 +382,13 @@ def upload_labelme_dataset():
         
         # 读取现有的类别和标注信息
         classes = []
-        if os.path.exists(CLASSES_FILE):
-            with open(CLASSES_FILE, 'r') as f:
+        if os.path.exists(PATHS['classes']):
+            with open(PATHS['classes'], 'r') as f:
                 classes = json.load(f)
         
         annotations = {}
-        if os.path.exists(ANNOTATIONS_FILE):
-            with open(ANNOTATIONS_FILE, 'r') as f:
+        if os.path.exists(PATHS['annotations']):
+            with open(PATHS['annotations'], 'r') as f:
                 annotations = json.load(f)
         
         # 获取已有类别名称集合，便于快速查找
@@ -1000,7 +409,7 @@ def upload_labelme_dataset():
         # 处理图像文件
         for image_filename, image_file in image_files.items():
             # 保存图像文件
-            image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_filename)
+            image_path = os.path.join(PATHS['uploads'], image_filename)
             image_file.save(image_path)
             uploaded_files.append(image_filename)
             
@@ -1083,10 +492,10 @@ def upload_labelme_dataset():
                 processed_annotations += 1
         
         # 保存更新后的类别和标注信息
-        with open(CLASSES_FILE, 'w') as f:
+        with open(PATHS['classes'], 'w') as f:
             json.dump(classes, f, indent=2)
         
-        with open(ANNOTATIONS_FILE, 'w') as f:
+        with open(PATHS['annotations'], 'w') as f:
             json.dump(annotations, f, indent=2)
         
         return jsonify({
@@ -1121,7 +530,7 @@ def upload_video():
         
         # 使用UUID作为临时文件名（避免中文路径问题）
         temp_filename = f"temp_{uuid.uuid4().hex}{video_ext}"
-        temp_video_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
+        temp_video_path = os.path.join(PATHS['uploads'], temp_filename)
         video_file.save(temp_video_path)
         
         # 抽帧处理，传入原始文件名用于命名帧图片
@@ -1174,7 +583,7 @@ def extract_frames(video_path, frame_interval, original_name=None):
         if frame_count % frame_interval == 0:
             # 生成文件名
             frame_filename = f"{original_name}_frame_{saved_frame_count:06d}.jpg"
-            frame_path = os.path.join(app.config['UPLOAD_FOLDER'], frame_filename)
+            frame_path = os.path.join(PATHS['uploads'], frame_filename)
             
             # Windows中文路径兼容：使用cv2.imencode + 文件写入
             success, encoded_img = cv2.imencode('.jpg', frame)
@@ -1194,9 +603,9 @@ def extract_frames(video_path, frame_interval, original_name=None):
 def get_annotations(image_name):
     """获取特定图片的标注"""
     annotations = {}
-    if os.path.exists(ANNOTATIONS_FILE):
+    if os.path.exists(PATHS['annotations']):
         try:
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+            with open(PATHS['annotations'], 'r', encoding='utf-8') as f:
                 annotations = json.load(f)
         except json.JSONDecodeError:
             # 如果JSON文件无效或为空，使用空字典
@@ -1227,7 +636,7 @@ def save_annotations(image_name):
     }
     
     # 使用文件锁防止并发写入
-    lock_file = ANNOTATIONS_FILE + '.lock'
+    lock_file = PATHS['annotations'] + '.lock'
     lock = filelock.FileLock(lock_file, timeout=10)
     
     try:
@@ -1236,10 +645,10 @@ def save_annotations(image_name):
             metrics['lock_wait_ms'] = int((time.perf_counter() - lock_wait_started) * 1000)
             # 读取现有标注
             annotations = {}
-            if os.path.exists(ANNOTATIONS_FILE):
+            if os.path.exists(PATHS['annotations']):
                 try:
                     read_started = time.perf_counter()
-                    with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+                    with open(PATHS['annotations'], 'r', encoding='utf-8') as f:
                         content = f.read()
                         if content.strip():  # 确保文件不为空
                             annotations = json.loads(content)
@@ -1253,11 +662,11 @@ def save_annotations(image_name):
                     return jsonify({'error': f'读取标注文件失败: {str(e)}'}), 500
             
             # 保存前先备份（每次保存都备份，保留最近一次）
-            if os.path.exists(ANNOTATIONS_FILE):
-                backup_file = ANNOTATIONS_FILE + '.bak'
+            if os.path.exists(PATHS['annotations']):
+                backup_file = PATHS['annotations'] + '.bak'
                 try:
                     backup_started = time.perf_counter()
-                    shutil.copy2(ANNOTATIONS_FILE, backup_file)
+                    shutil.copy2(PATHS['annotations'], backup_file)
                     metrics['backup_ms'] = int((time.perf_counter() - backup_started) * 1000)
                 except Exception as e:
                     print(f"备份失败: {e}")
@@ -1266,7 +675,7 @@ def save_annotations(image_name):
             annotations[image_name] = data
             
             # 先写入临时文件，成功后再替换原文件
-            temp_file = ANNOTATIONS_FILE + '.tmp'
+            temp_file = PATHS['annotations'] + '.tmp'
             try:
                 write_started = time.perf_counter()
                 with open(temp_file, 'w', encoding='utf-8') as f:
@@ -1277,10 +686,10 @@ def save_annotations(image_name):
                     json.load(f)  # 验证JSON格式
                 
                 # 替换原文件
-                if os.path.exists(ANNOTATIONS_FILE):
-                    os.replace(temp_file, ANNOTATIONS_FILE)
+                if os.path.exists(PATHS['annotations']):
+                    os.replace(temp_file, PATHS['annotations'])
                 else:
-                    os.rename(temp_file, ANNOTATIONS_FILE)
+                    os.rename(temp_file, PATHS['annotations'])
                 metrics['write_verify_replace_ms'] = int((time.perf_counter() - write_started) * 1000)
                     
             except Exception as e:
@@ -1342,10 +751,10 @@ def ai_annotate():
             return jsonify({'error': 'Model not specified'}), 400
         # 构建路径
         if not os.path.isabs(install_path):
-            install_path = os.path.join(app.root_path, install_path)
+            install_path = os.path.join(PATHS['root'], install_path)
         
         # 构建绝对路径
-        image_path = os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], image_name)
+        image_path = os.path.join(PATHS['uploads'], image_name)
         model_path = os.path.join(install_path, 'models', model_name)
         
         # 确保路径是绝对路径
@@ -1446,8 +855,8 @@ print("###JSON_END###")
         
         # 读取现有类别
         existing_classes = []
-        if os.path.exists(CLASSES_FILE):
-            with open(CLASSES_FILE, 'r') as f:
+        if os.path.exists(PATHS['classes']):
+            with open(PATHS['classes'], 'r') as f:
                 existing_classes = json.load(f)
         
         existing_class_names = {cls['name'] for cls in existing_classes}
@@ -1476,7 +885,7 @@ print("###JSON_END###")
         
         # 保存新增的类别
         if new_classes_added:
-            with open(CLASSES_FILE, 'w') as f:
+            with open(PATHS['classes'], 'w') as f:
                 json.dump(existing_classes, f, indent=2)
         
         return jsonify({
@@ -1519,7 +928,7 @@ def ai_annotate_batch():
         
         # 构建路径
         if not os.path.isabs(install_path):
-            install_path = os.path.join(app.root_path, install_path)
+            install_path = os.path.join(PATHS['root'], install_path)
         
         model_path = os.path.join(install_path, 'models', model_name)
         model_path = os.path.abspath(model_path)
@@ -1543,7 +952,7 @@ def ai_annotate_batch():
         image_paths = []
         valid_image_names = []
         for img_name in image_names:
-            img_path = os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], img_name)
+            img_path = os.path.join(PATHS['uploads'], img_name)
             img_path = os.path.abspath(img_path)
             if os.path.exists(img_path):
                 image_paths.append(img_path)
@@ -1627,8 +1036,8 @@ print("###JSON_END###")
         
         # 读取现有类别
         existing_classes = []
-        if os.path.exists(CLASSES_FILE):
-            with open(CLASSES_FILE, 'r') as f:
+        if os.path.exists(PATHS['classes']):
+            with open(PATHS['classes'], 'r') as f:
                 existing_classes = json.load(f)
         
         existing_class_names = {cls['name'] for cls in existing_classes}
@@ -1636,8 +1045,8 @@ print("###JSON_END###")
         
         # 读取现有标注
         all_saved_annotations = {}
-        if os.path.exists(ANNOTATIONS_FILE):
-            with open(ANNOTATIONS_FILE, 'r') as f:
+        if os.path.exists(PATHS['annotations']):
+            with open(PATHS['annotations'], 'r') as f:
                 all_saved_annotations = json.load(f)
         
         # 处理每张图片的标注结果
@@ -1677,12 +1086,12 @@ print("###JSON_END###")
             })
         
         # 保存所有标注
-        with open(ANNOTATIONS_FILE, 'w') as f:
+        with open(PATHS['annotations'], 'w') as f:
             json.dump(all_saved_annotations, f, indent=2)
         
         # 保存新增的类别
         if new_classes_added:
-            with open(CLASSES_FILE, 'w') as f:
+            with open(PATHS['classes'], 'w') as f:
                 json.dump(existing_classes, f, indent=2)
         
         return jsonify({
@@ -1721,7 +1130,7 @@ def parse_target_classes(raw_value):
     if parsed:
         return parsed
 
-    local_classes = read_json_file(CLASSES_FILE, [])
+    local_classes = read_classes()
     fallback = []
     for cls in local_classes:
         name = str(cls.get('name') or '').strip()
@@ -1733,7 +1142,7 @@ def parse_target_classes(raw_value):
 @app.route('/api/sam3/status')
 def sam3_status():
     """Check SAM3 model availability."""
-    model_path = os.environ.get("SAM3_MODEL_PATH", os.path.join(app.root_path, 'plugins', 'sam3', 'models', 'model.pt'))
+    model_path = os.environ.get("SAM3_MODEL_PATH", PATHS['plugins_sam3_models'])
     return jsonify({
         'loaded': sam3_service.is_loaded,
         'model_path': model_path,
@@ -1758,13 +1167,13 @@ def ai_annotate_sam3():
         if not sam3_service.is_loaded:
             return jsonify({'error': 'SAM3模型未加载，请检查模型文件'}), 503
 
-        image_path = os.path.abspath(os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], image_name))
+        image_path = os.path.abspath(os.path.join(PATHS['uploads'], image_name))
         if not os.path.exists(image_path):
             return jsonify({'error': f'图片不存在: {image_name}'}), 400
 
         annotations = sam3_service.detect_from_file(image_path, text=target_classes, conf=confidence)
 
-        existing_classes = read_json_file(CLASSES_FILE, [])
+        existing_classes = read_classes()
         new_classes_added = False
         for ann in annotations:
             cls_name = ann.get('class')
@@ -1783,7 +1192,7 @@ def ai_annotate_sam3():
             ann['id'] = int(hash(f"{cls_name}_{ann['points'][0][0]}_{ann['points'][0][1]}") % 1000000000)
 
         if new_classes_added:
-            write_json_file(CLASSES_FILE, existing_classes)
+            write_classes(existing_classes)
 
         return jsonify({
             'success': True,
@@ -1819,7 +1228,7 @@ def ai_annotate_sam3_batch():
         image_paths = []
         valid_image_names = []
         for img_name in image_names:
-            img_path = os.path.abspath(os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], img_name))
+            img_path = os.path.abspath(os.path.join(PATHS['uploads'], img_name))
             if os.path.exists(img_path):
                 image_paths.append(img_path)
                 valid_image_names.append(img_name)
@@ -1828,8 +1237,8 @@ def ai_annotate_sam3_batch():
 
         all_results = sam3_service.detect_batch_from_files(image_paths, text=target_classes, conf=confidence)
 
-        existing_classes = read_json_file(CLASSES_FILE, [])
-        annotations = read_json_file(ANNOTATIONS_FILE, {})
+        existing_classes = read_classes()
+        annotations = read_annotations()
 
         response_results = []
         total_detected = 0
@@ -1864,8 +1273,8 @@ def ai_annotate_sam3_batch():
                 'annotations': image_annotations,
             })
 
-        write_json_file(ANNOTATIONS_FILE, annotations)
-        write_json_file(CLASSES_FILE, existing_classes)
+        write_annotations(annotations)
+        write_classes(existing_classes)
 
         return jsonify({
             'success': True,
@@ -1888,7 +1297,7 @@ def check_yolo11_install():
     """检查YOLO11安装状态"""
     import os
     # 检查YOLO11安装路径是否存在
-    yolo11_path = os.path.join(app.root_path, 'plugins', 'yolo11')
+    yolo11_path = PATHS['plugins_yolo11']
     is_installed = os.path.exists(yolo11_path) and os.path.isdir(yolo11_path)
     
     # 初始化安装信息
@@ -1927,7 +1336,7 @@ def download_models():
     install_path = request.args.get('install_path', 'plugins/yolo11')
 
     if not os.path.isabs(install_path):
-        install_path = os.path.join(app.root_path, install_path)
+        install_path = os.path.join(PATHS['root'], install_path)
 
     def sse(payload: dict) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -2003,7 +1412,7 @@ def list_models():
     install_path = request.args.get('install_path', 'plugins/yolo11')
     # 确保安装路径是相对于项目根目录的
     if not os.path.isabs(install_path):
-        install_path = os.path.join(app.root_path, install_path)
+        install_path = os.path.join(PATHS['root'], install_path)
     
     # 初始化模型列表
     models = []
@@ -2030,7 +1439,7 @@ def upload_model():
     install_path = request.headers.get('X-Install-Path', 'plugins/yolo11')
     # 确保安装路径是相对于项目根目录的
     if not os.path.isabs(install_path):
-        install_path = os.path.join(app.root_path, install_path)
+        install_path = os.path.join(PATHS['root'], install_path)
     
     # 检查YOLO11是否安装
     if not os.path.exists(install_path) or not os.path.isdir(install_path):
@@ -2066,7 +1475,7 @@ def delete_model():
     install_path = request.headers.get('X-Install-Path', 'plugins/yolo11')
     # 确保安装路径是相对于项目根目录的
     if not os.path.isabs(install_path):
-        install_path = os.path.join(app.root_path, install_path)
+        install_path = os.path.join(PATHS['root'], install_path)
     
     # 获取模型名称
     data = request.json or {}
@@ -2121,8 +1530,8 @@ def export_dataset():
         
         # 获取全局类别列表
         classes = []
-        if os.path.exists(CLASSES_FILE):
-            with open(CLASSES_FILE, 'r') as f:
+        if os.path.exists(PATHS['classes']):
+            with open(PATHS['classes'], 'r') as f:
                 classes = json.load(f)
         
         # 创建临时目录用于生成数据集
@@ -2144,14 +1553,14 @@ def export_dataset():
         
         # 获取所有图片
         images = []
-        for filename in os.listdir(app.config['UPLOAD_FOLDER']):
+        for filename in os.listdir(PATHS['uploads']):
             if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
                 images.append(filename)
         
         # 根据样本选择参数过滤图片
         annotations = {}
-        if os.path.exists(ANNOTATIONS_FILE):
-            with open(ANNOTATIONS_FILE, 'r') as f:
+        if os.path.exists(PATHS['annotations']):
+            with open(PATHS['annotations'], 'r') as f:
                 annotations = json.load(f)
         
         # 根据用户选择过滤图片
@@ -2229,7 +1638,7 @@ names: {selected_classes}
         for split_name, split_images in splits:
             for image_name in split_images:
                 # 复制图片，添加前缀
-                src_img_path = os.path.join(app.config['UPLOAD_FOLDER'], image_name)
+                src_img_path = os.path.join(PATHS['uploads'], image_name)
                 if export_prefix:
                     dst_img_name = f"{export_prefix}_{image_name}"
                 else:
@@ -2357,9 +1766,9 @@ names: {selected_classes}
 def list_videos():
     """List uploaded videos that can be used for SOP timeline annotation."""
     videos = []
-    for filename in os.listdir(app.config['UPLOAD_FOLDER']):
+    for filename in os.listdir(PATHS['uploads']):
         if filename.lower().endswith(VIDEO_EXTENSIONS):
-            path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            path = os.path.join(PATHS['uploads'], filename)
             videos.append({
                 'name': filename,
                 'size': os.path.getsize(path),
@@ -2371,7 +1780,7 @@ def list_videos():
 
 @app.route('/api/video/<path:filename>')
 def get_video(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    return send_from_directory(PATHS['uploads'], filename)
 
 
 @app.route('/api/upload/timeline-video', methods=['POST'])
@@ -2389,17 +1798,17 @@ def upload_timeline_video():
         return jsonify({'error': f'Unsupported video extension: {ext}'}), 400
     filename = safe_name
     index = 1
-    while os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], filename)):
+    while os.path.exists(os.path.join(PATHS['uploads'], filename)):
         filename = f"{base}_{index}{ext}"
         index += 1
-    path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    path = os.path.join(PATHS['uploads'], filename)
     video_file.save(path)
     return jsonify({'message': 'Timeline video uploaded', 'video_name': filename, 'url': f'/api/video/{filename}'})
 
 
 @app.route('/api/scenario')
 def get_sop_scenario():
-    return jsonify(read_json_file(SCENARIO_FILE, {'scenario_id': '', 'name': '', 'steps': [], 'object_classes': [], 'action_labels': []}))
+    return jsonify(read_scenario())
 
 
 @app.route('/api/scenario', methods=['POST'])
@@ -2408,7 +1817,7 @@ def save_sop_scenario():
     scenario.setdefault('steps', [])
     scenario.setdefault('object_classes', [])
     scenario.setdefault('action_labels', [])
-    write_json_file(SCENARIO_FILE, scenario)
+    write_scenario(scenario)
     if scenario.get('object_classes'):
         sync_object_classes_to_labels(scenario.get('object_classes', []), replace=bool(scenario.get('replace_classes')))
     return jsonify({'message': 'Scenario saved', 'scenario': scenario})
@@ -2423,7 +1832,7 @@ def import_sop_scenario():
         return jsonify({'error': 'scenario_path is required'}), 400
     try:
         scenario = parse_sop_scenario(scenario_path)
-        write_json_file(SCENARIO_FILE, scenario)
+        write_scenario(scenario)
         classes = sync_object_classes_to_labels(scenario.get('object_classes', []), replace=bool(data.get('replace_classes', True)))
         return jsonify({'message': 'Scenario imported', 'scenario': scenario, 'classes': classes})
     except Exception as exc:
@@ -2433,12 +1842,12 @@ def import_sop_scenario():
 
 @app.route('/api/timelines')
 def list_timelines():
-    return jsonify(read_json_file(TIMELINES_FILE, {}))
+    return jsonify(read_timelines())
 
 
 @app.route('/api/timelines/<path:video_name>')
 def get_timeline(video_name):
-    timelines = read_json_file(TIMELINES_FILE, {})
+    timelines = read_timelines()
     return jsonify(timelines.get(video_name, []))
 
 
@@ -2448,16 +1857,16 @@ def save_timeline(video_name):
     raw_segments = payload if isinstance(payload, list) else payload.get('segments', [])
     segments = [normalize_timeline_segment(seg, video_name) for seg in raw_segments]
     segments.sort(key=lambda x: (x['start_sec'], x['end_sec'], x['step_id']))
-    timelines = read_json_file(TIMELINES_FILE, {})
+    timelines = read_timelines()
     timelines[video_name] = segments
-    write_json_file(TIMELINES_FILE, timelines)
+    write_timelines(timelines)
     return jsonify({'message': 'Timeline saved', 'video_name': video_name, 'segments': segments, 'count': len(segments)})
 
 
 @app.route('/api/export-timeline')
 def export_timeline_csv():
     """Export all SOP action segments as universal_sop_platform timeline CSV."""
-    timelines = read_json_file(TIMELINES_FILE, {})
+    timelines = read_timelines()
     fieldnames = ['video_name', 'start_sec', 'end_sec', 'step_id', 'action_label', 'target_id', 'part_id', 'event_type', 'is_complete', 'error_type', 'remark']
     out = StringIO()
     out.write('\ufeff')
@@ -2501,9 +1910,9 @@ def train_split_reset():
     payload = request.json or {}
     profile_id = str(payload.get("profile_id") or "default")
     with TRAINING_SPLITS_LOCK:
-        profiles = read_json_file(TRAINING_SPLITS_FILE, {})
+        profiles = read_json_file(PATHS['training_splits'], {})
         profiles.pop(profile_id, None)
-        write_json_file(TRAINING_SPLITS_FILE, profiles)
+        write_json_file(PATHS['training_splits'], profiles)
     return jsonify(build_split_summary({"profile_id": profile_id}))
 
 
@@ -2528,10 +1937,6 @@ def _get_train_job_or_404(job_id: str):
     if not job:
         return None, (jsonify({"error": "job not found"}), 404)
     return job, None
-
-
-def _artifact_allowed_roots() -> list[str]:
-    return [os.path.join(app.root_path, "static", "train_work"), get_models_dir()]
 
 
 @app.route('/api/train/jobs/<job_id>/logs')
@@ -2669,7 +2074,7 @@ def train_start():
         "total_images": readiness["total_images"],
         "split_config": split_config,
         "split_counts": {},
-        "log_path": os.path.join(app.root_path, "static", "train_work", job_id, "train.log"),
+        "log_path": os.path.join(PATHS['train_work'], job_id, "train.log"),
         "log_tail": "",
         "results_csv": "",
         "results_png": "",
@@ -2680,7 +2085,7 @@ def train_start():
     }
     upsert_train_job(job)
 
-    t = threading.Thread(target=run_training_job, args=(job_id,), daemon=True)
+    t = threading.Thread(target=run_training_job, args=(job_id, current_app.root_path), daemon=True)
     t.start()
     return jsonify({"message": "training started", "job": job})
 

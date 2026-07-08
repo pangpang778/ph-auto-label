@@ -13,38 +13,7 @@ import app as training_app
 from training_artifacts import read_training_metrics_series, resolve_artifact
 
 
-@pytest.fixture()
-def isolated_app(tmp_path, monkeypatch):
-    upload_dir = tmp_path / "uploads"
-    annotations_dir = tmp_path / "static" / "annotations"
-    train_work_dir = tmp_path / "static" / "train_work"
-    models_dir = tmp_path / "plugins" / "yolo11" / "models"
-    for path in (upload_dir, annotations_dir, train_work_dir, models_dir):
-        path.mkdir(parents=True, exist_ok=True)
-
-    files = {
-        "ANNOTATIONS_FILE": annotations_dir / "annotations.json",
-        "CLASSES_FILE": annotations_dir / "classes.json",
-        "TRAINING_SPLITS_FILE": annotations_dir / "training_splits.json",
-        "TRAIN_JOBS_FILE": annotations_dir / "train_jobs.json",
-        "MODEL_REGISTRY_FILE": annotations_dir / "model_registry.json",
-        "ACTIVE_MODEL_FILE": annotations_dir / "active_model.json",
-    }
-    defaults = {
-        "ANNOTATIONS_FILE": {},
-        "CLASSES_FILE": [{"name": "part", "color": "#fff"}],
-        "TRAINING_SPLITS_FILE": {},
-        "TRAIN_JOBS_FILE": [],
-        "MODEL_REGISTRY_FILE": [],
-        "ACTIVE_MODEL_FILE": {"model_id": "", "model_name": "", "model_path": ""},
-    }
-    for name, path in files.items():
-        path.write_text(json.dumps(defaults[name]), encoding="utf-8")
-        monkeypatch.setattr(training_app, name, str(path))
-
-    monkeypatch.setitem(training_app.app.config, "UPLOAD_FOLDER", str(upload_dir))
-    monkeypatch.setattr(training_app.app, "root_path", str(tmp_path))
-    yield training_app.app
+# isolated_app fixture lives in conftest.py (shared across characterization tests).
 
 
 def _write_training_images(upload_dir: Path, annotations_path: Path, count: int = 20) -> list[str]:
@@ -89,8 +58,8 @@ def test_normalize_split_config_accepts_percentages_and_rejects_invalid_ratios()
 @pytest.mark.integration
 def test_split_save_and_reset_endpoints_persist_assignments(isolated_app):
     _write_training_images(
-        Path(isolated_app.config["UPLOAD_FOLDER"]),
-        Path(training_app.ANNOTATIONS_FILE),
+        Path(training_app.PATHS['uploads']),
+        Path(training_app.PATHS['annotations']),
         count=20,
     )
 
@@ -105,7 +74,7 @@ def test_split_save_and_reset_endpoints_persist_assignments(isolated_app):
     assert saved["counts"] == {"train": 12, "val": 4, "test": 4}
     assert sum(len(saved["split_config"]["assignments"][split]) for split in ("train", "val", "test")) == 20
 
-    persisted = json.loads(Path(training_app.TRAINING_SPLITS_FILE).read_text(encoding="utf-8"))
+    persisted = json.loads(Path(training_app.PATHS['training_splits']).read_text(encoding="utf-8"))
     assert "default" in persisted
     assert persisted["default"]["split_config"]["assignments"]["train"]
 
@@ -114,7 +83,7 @@ def test_split_save_and_reset_endpoints_persist_assignments(isolated_app):
     assert reset_response.status_code == 200
     reset = reset_response.get_json()
     assert reset["counts"] == {"train": 16, "val": 3, "test": 1}
-    assert json.loads(Path(training_app.TRAINING_SPLITS_FILE).read_text(encoding="utf-8")) == {}
+    assert json.loads(Path(training_app.PATHS['training_splits']).read_text(encoding="utf-8")) == {}
 
 
 @pytest.mark.integration
@@ -181,7 +150,7 @@ def test_resolve_artifact_allows_recorded_file_and_rejects_traversal(tmp_path):
 def test_artifact_endpoint_rejects_corrupted_traversal_path(isolated_app, tmp_path):
     outside_file = tmp_path / "outside-results.csv"
     outside_file.write_text("epoch,metric\n1,0.9\n", encoding="utf-8")
-    Path(training_app.TRAIN_JOBS_FILE).write_text(
+    Path(training_app.PATHS['train_jobs']).write_text(
         json.dumps([{"id": "job-1", "results_csv": str(outside_file)}]),
         encoding="utf-8",
     )
@@ -198,7 +167,7 @@ def test_non_download_artifact_endpoints_reject_corrupted_outside_paths(isolated
     outside_csv = tmp_path / "outside-results.csv"
     outside_log.write_text("secret log", encoding="utf-8")
     outside_csv.write_text("epoch,metric\n1,0.9\n", encoding="utf-8")
-    Path(training_app.TRAIN_JOBS_FILE).write_text(
+    Path(training_app.PATHS['train_jobs']).write_text(
         json.dumps([{"id": "job-1", "log_path": str(outside_log), "results_csv": str(outside_csv)}]),
         encoding="utf-8",
     )
@@ -222,7 +191,7 @@ def test_native_yolo_image_gallery_lists_and_serves_allowed_images(isolated_app,
     (run_dir / "BoxPR_curve.png").write_bytes(b"pr-png")
     (run_dir / "train_batch0.jpg").write_bytes(b"jpg-bytes")
     (run_dir / "notes.txt").write_text("ignore", encoding="utf-8")
-    Path(training_app.TRAIN_JOBS_FILE).write_text(
+    Path(training_app.PATHS['train_jobs']).write_text(
         json.dumps([{"id": "gallery-job", "status": "completed", "run_dir": str(run_dir)}]),
         encoding="utf-8",
     )
@@ -248,7 +217,7 @@ def test_legacy_completed_job_artifacts_fall_back_to_run_dir(isolated_app, tmp_p
     run_dir.mkdir(parents=True)
     (run_dir / "results.csv").write_text("epoch,metrics/mAP50(B)\n1,0.75\n", encoding="utf-8")
     (run_dir / "results.png").write_bytes(b"png-bytes")
-    Path(training_app.TRAIN_JOBS_FILE).write_text(
+    Path(training_app.PATHS['train_jobs']).write_text(
         json.dumps([{"id": "legacy-job", "status": "completed", "run_dir": str(run_dir)}]),
         encoding="utf-8",
     )
@@ -266,8 +235,8 @@ def test_legacy_completed_job_artifacts_fall_back_to_run_dir(isolated_app, tmp_p
 @pytest.mark.unit
 def test_legacy_dataset_split_matches_previous_deterministic_fallback(isolated_app, tmp_path):
     image_names = _write_training_images(
-        Path(isolated_app.config["UPLOAD_FOLDER"]),
-        Path(training_app.ANNOTATIONS_FILE),
+        Path(training_app.PATHS['uploads']),
+        Path(training_app.PATHS['annotations']),
         count=20,
     )
     expected = list(sorted(image_names))
