@@ -754,6 +754,22 @@
     <div id="toast" class="toast"></div>
 
     <script src="{{ url_for('static', filename='vendor/chart.js') }}"></script>
-    <script src="{{ url_for('static', filename='script.js') }}"></script>
+    <!-- Frontend split into domain modules (classic scripts, shared global scope).
+         Order: state first (shared let/const), utils (registers DOMContentLoaded),
+         then function-declaration modules (resolve at call-time), app last (initializeApp).
+         The former single-file static/script.js is superseded by these modules. -->
+    <script src="{{ url_for('static', filename='js/state.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/canvas.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/classes.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/images.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/workflow.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/annotations.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/export.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/models.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/ai-annotate.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/training.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/timeline.js') }}"></script>
 </body>
 </html>
