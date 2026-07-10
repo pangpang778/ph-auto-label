@@ -573,10 +573,36 @@ def list_available_videos() -> List[Dict[str, Any]]:
     return list(seen.values())
 
 
+def _is_within(base: str, name: str) -> Optional[str]:
+    """Resolve ``name`` under ``base`` and return the real path if it stays
+    inside, else ``None``.
+
+    Rejects traversal (``..``), absolute paths, and any resolve that escapes
+    ``base``. This guards the path fed to ffmpeg/YOLO so a ``<path:name>`` route
+    cannot read arbitrary files. Local impl (plugins must not depend on app.common).
+    """
+    if not name or not isinstance(name, str):
+        return None
+    if os.path.isabs(name) or '..' in name.replace('\\', '/').split('/'):
+        return None
+    base_real = os.path.realpath(base)
+    child = os.path.realpath(os.path.join(base_real, name))
+    try:
+        base_nc = os.path.normcase(base_real)
+        if os.path.commonpath([base_nc, os.path.normcase(child)]) != base_nc:
+            return None
+    except ValueError:
+        # Different drives (Windows) -> incomparable, treat as outside.
+        return None
+    if not os.path.isfile(child):
+        return None
+    return child
+
+
 def resolve_video_path(name: str) -> Optional[str]:
-    """按文件名在两个目录里找视频。"""
+    """按文件名在两个目录里找视频。拒绝越界路径（../、绝对路径）。"""
     for d in (UPLOAD_VIDEO_DIR, STATIC_VIDEO_DIR):
-        p = os.path.join(d, name)
-        if os.path.isfile(p):
+        p = _is_within(d, name)
+        if p:
             return p
     return None
