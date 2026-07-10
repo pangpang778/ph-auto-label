@@ -68,6 +68,22 @@ def run_training_job(job_id: str, root_path: str = "") -> None:
         _mark_completed(job, model_info)
     except Exception as exc:
         _mark_failed(job, exc)
+        _cleanup_failed_dataset(job, job_dir)
+
+
+def _cleanup_failed_dataset(job: dict, job_dir: str) -> None:
+    """Remove the per-job dataset copy on failure (MEDIUM: artifact cleanup).
+
+    Keeps ``train.log`` and ``runs/`` for post-mortem diagnostics; only the
+    (often large) dataset image/label copy under ``job_dir/dataset`` is
+    removed. Best-effort: never raises into the failure path.
+    """
+    try:
+        dataset_dir = job.get("dataset_dir") or os.path.join(job_dir, "dataset")
+        if dataset_dir and os.path.isdir(dataset_dir):
+            shutil.rmtree(dataset_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _load_job(job_id: str) -> dict | None:
@@ -147,7 +163,12 @@ def _attach_epoch_callback(model, job: dict) -> None:
         epoch = int(getattr(trainer, "epoch", 0) or 0) + 1
         job["epoch"] = min(epoch, total_epochs)
         job["total_epochs"] = total_epochs
-        job["progress"] = min(95, 25 + int((job["epoch"] / max(total_epochs, 1)) * 70))
+        # Clamp to the current progress so the first epoch callback never
+        # regresses below the pre-train baseline (45). MEDIUM (progress
+        # regression) fix: 25 + int(epoch/total*70) dips to ~39 on epoch 1 of
+        # a 5-epoch run, which is below the 45 set in _train_model_phase.
+        target = min(95, 25 + int((job["epoch"] / max(total_epochs, 1)) * 70))
+        job["progress"] = max(int(job.get("progress", 0) or 0), target)
         job["message"] = f"Training epoch {job['epoch']}/{total_epochs}"
         append_train_log(job, job["message"])
         now = time.time()

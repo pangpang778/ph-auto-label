@@ -10,9 +10,11 @@ import math
 import os
 
 from app.common.config import PATHS
+from app.common.path_safety import PathSafetyError, secure_save_path
 from app.services.annotation_service import read_annotations, read_classes, write_annotations, write_classes
 
 _IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
+_JSON_EXTENSIONS = ('.json',)
 
 
 def import_labelme_dataset(files):
@@ -29,16 +31,33 @@ def import_labelme_dataset(files):
     processed_annotations = 0
 
     for image_filename, image_bytes in image_files.items():
-        image_path = os.path.join(PATHS['uploads'], image_filename)
+        # secure_save_path runs secure_filename + containment: a name with '..'
+        # or separators is rejected (PathSafetyError) instead of writing outside uploads/.
+        try:
+            image_path = secure_save_path(
+                PATHS['uploads'], image_filename, extensions=_IMAGE_EXTENSIONS,
+            )
+        except PathSafetyError as e:
+            # Re-raise as ValueError so the handler can map it (PathSafetyError is
+            # already a ValueError subclass). Traversal input must NOT be written.
+            raise ValueError(f'非法图片文件名: {image_filename}: {e}') from e
+        safe_image_name = os.path.basename(image_path)
         with open(image_path, 'wb') as f:
             f.write(image_bytes)
-        uploaded_files.append(image_filename)
+        uploaded_files.append(safe_image_name)
 
-        json_filename = os.path.splitext(image_filename)[0] + '.json'
-        if json_filename in json_files:
-            json_content = json.loads(json_files[json_filename].decode('utf-8'))
+        # Pair the LabelMe JSON by the sanitized stem so image<->json still match.
+        json_filename = os.path.splitext(safe_image_name)[0] + '.json'
+        # json_files was keyed by original upload names; also try the original
+        # image_filename's stem in case the client sent the JSON under that name.
+        json_content_bytes = json_files.get(json_filename)
+        if json_content_bytes is None:
+            orig_json = os.path.splitext(image_filename)[0] + '.json'
+            json_content_bytes = json_files.get(orig_json)
+        if json_content_bytes is not None:
+            json_content = json.loads(json_content_bytes.decode('utf-8'))
             image_annotations = _parse_labelme_shapes(json_content, classes, existing_class_names)
-            annotations[image_filename] = image_annotations
+            annotations[safe_image_name] = image_annotations
             processed_annotations += 1
 
     write_classes(classes)

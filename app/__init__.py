@@ -25,7 +25,6 @@ from app.services.training_service import (
     _artifact_allowed_roots,
     build_yolo_training_dataset,
     normalize_split_config,
-    run_training_job,
 )
 from plugins.sam3_service import sam3_service
 from plugins.video_inference import video_inference_service
@@ -33,7 +32,10 @@ from plugins.video_inference import video_inference_service
 __all__ = [
     "create_app", "PATHS", "VIDEO_EXTENSIONS",
     "video_inference_service", "sam3_service",
-    "normalize_split_config", "build_yolo_training_dataset", "run_training_job",
+    # DEPRECATED: compat re-exports for tests using ``training_app.<symbol>``;
+    # migrate tests to import from app.services.training_service directly.
+    "normalize_split_config", "build_yolo_training_dataset",
+    "_artifact_allowed_roots",
     "get_active_model", "get_models_dir", "get_models_install_path",
 ]
 
@@ -105,18 +107,20 @@ def create_app():
     )
 
     # --- Security config -------------------------------------------------
-    # SECRET_KEY must always be set, even though sessions are not currently
-    # used, so a future session/flash dependency cannot silently fall back to
-    # a static default. Per-start random is acceptable here; production should
-    # supply SECRET_KEY via the environment.
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or os.urandom(32)
+    # SECRET_KEY: honor an explicit env value; otherwise random per start with
+    # a warning (sessions reset on restart). Production MUST set SECRET_KEY.
+    secret = os.environ.get("SECRET_KEY")
+    if not secret:
+        secret = os.urandom(32)
+        app.logger.warning("SECRET_KEY 未设置，使用随机值，session 将在重启后失效")
+    app.config["SECRET_KEY"] = secret
 
-    # CORS origins are configurable via ALLOWED_ORIGINS (comma-separated).
-    # Default "*" preserves local-dev behavior; PRODUCTION MUST override this.
+    # CORS origins configurable via ALLOWED_ORIGINS (comma-separated). Fallback
+    # is local-dev only; PRODUCTION MUST set ALLOWED_ORIGINS explicitly.
     allowed = os.environ.get("ALLOWED_ORIGINS")
     cors_origins = (
         [o.strip() for o in allowed.split(",") if o.strip()]
-        if allowed else "*"
+        if allowed else ["http://127.0.0.1:5000", "http://localhost:5000"]
     )
     CORS(app, origins=cors_origins)
 

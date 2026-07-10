@@ -14,6 +14,7 @@ import sys
 import time
 
 from app.common.config import PATHS
+from app.common.json_store import read_json_file
 from app.common.path_safety import PathSafetyError, resolve_child_path
 from app.repositories.model_registry_repo import (
     MODEL_REGISTRY_LOCK,
@@ -23,6 +24,7 @@ from app.repositories.model_registry_repo import (
     get_models_install_path,
     read_model_registry,
     set_active_model as set_active,
+    update_model_registry,
     write_model_registry,
 )
 
@@ -38,6 +40,20 @@ _MODEL_NAME_ENV = 'PH_MODEL_NAME'
 
 class ModelDownloadError(ValueError):
     """Raised when a model name is invalid or download setup fails."""
+
+
+class ModelNotFoundError(ValueError):
+    """Raised by :func:`activate_model` when ``model_id`` is not in the registry.
+
+    Blueprint maps this to HTTP 404 with ``{"error": "model not found"}``.
+    """
+
+
+class ModelFileMissingError(ValueError):
+    """Raised by :func:`activate_model` when the weights file is absent on disk.
+
+    Blueprint maps this to HTTP 400 with ``{"error": "model file does not exist"}``.
+    """
 
 
 def _resolve_install_path(install_path):
@@ -69,6 +85,33 @@ def resolve_install_path(install_path):
     return _resolve_install_path(install_path)
 
 
+def list_installed_models(install_path: str | None = None) -> list[str]:
+    """Return the sorted ``.pt`` filenames under ``<install_path>/models``.
+
+    ``install_path`` is resolved through :func:`_resolve_install_path` when
+    provided (so user-controlled paths stay under the project root). ``None``
+    defaults to the plugin install path from
+    :func:`get_models_install_path`. Blueprints MUST call this instead of
+    ``os.listdir`` (H15 layering contract).
+    """
+    resolved = _resolve_install_path(install_path) if install_path else get_models_install_path()
+    models_dir = os.path.join(resolved, 'models')
+    if not os.path.isdir(models_dir):
+        return []
+    return sorted(f for f in os.listdir(models_dir) if f.endswith('.pt'))
+
+
+def read_install_info(install_path: str | None = None) -> dict:
+    """Read ``<install_path>/install_info.json`` as a dict.
+
+    ``install_path`` resolution mirrors :func:`list_installed_models`. A
+    missing or corrupt file returns ``{}`` (never raises) so the blueprint can
+    merge it onto its defaults without a 500. Uses :func:`read_json_file`.
+    """
+    resolved = _resolve_install_path(install_path) if install_path else get_models_install_path()
+    return read_json_file(os.path.join(resolved, 'install_info.json'), {})
+
+
 # Backward-compat aliases (deprecated; prefer append_record / set_active).
 # Kept so legacy callers keep resolving during migration to the
 # api-freeze.md section 2 contract names.
@@ -96,6 +139,36 @@ def next_model_version(mode: str) -> str:
     if mode == "initial":
         return f"v{ma + 1}.0"
     return f"v{ma}.{mi + 1}"
+
+
+def activate_model(model_id: str) -> dict:
+    """Promote a model to ``production`` and set it active (H7-service).
+
+    Atomic read-modify-write via :func:`update_model_registry`: the target
+    model becomes ``status="production"`` and every other ``production`` model
+    is demoted to ``"candidate"``. Raises :class:`ModelNotFoundError` (404) if
+    the id is unknown, or :class:`ModelFileMissingError` (400) if its weights
+    file does not exist on disk. Returns the activated model record (with
+    ``status="production"``).
+    """
+    if not model_id:
+        raise ModelNotFoundError("模型不存在")
+
+    def _mutator(models):
+        target = next((m for m in models if m.get("id") == model_id), None)
+        if target is None:
+            raise ModelNotFoundError("模型不存在")
+        if not os.path.exists(target.get("path", "")):
+            raise ModelFileMissingError("模型文件不存在")
+        for m in models:
+            if m.get("status") == "production":
+                m["status"] = "candidate"
+        target["status"] = "production"
+        return models, target
+
+    activated = update_model_registry(_mutator)
+    set_active(model_id, activated["name"], activated["path"])
+    return activated
 
 
 def stream_model_download(models, install_path):
@@ -165,8 +238,9 @@ def stream_model_download(models, install_path):
     except (GeneratorExit, BrokenPipeError, ConnectionResetError):
         return
     except Exception as e:
-        import traceback
-        yield _sse({'status': 'error', 'message': f'Download failed: {str(e)}', 'progress': 0, 'traceback': traceback.format_exc()})
+        # H7-service: do not echo server-side tracebacks to the SSE client
+        # (information leakage). The message alone is enough for the UI.
+        yield _sse({'status': 'error', 'message': f'Download failed: {str(e)}', 'progress': 0})
 
 
 def _sse(payload):

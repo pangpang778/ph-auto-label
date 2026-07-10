@@ -71,7 +71,7 @@ function downloadModels() {
     refreshBtn.disabled = true;
     
     // 使用EventSource实现服务器推送进度
-    const eventSource = new EventSource(`/api/download-models?models=${selectedModels.join(',')}&install_path=${encodeURIComponent(installPath)}`);
+    const eventSource = new EventSource(`/api/download-models?models=${encodeURIComponent(selectedModels.join(','))}&install_path=${encodeURIComponent(installPath)}`);
     
     eventSource.onmessage = function(event) {
         try {

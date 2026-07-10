@@ -10,15 +10,43 @@ import os
 _log = logging.getLogger(__name__)
 
 
-def read_json_file(path, default):
+class CorruptJSONError(Exception):
+    """Raised by ``read_json_file(..., strict=True)`` when a file exists but
+    cannot be parsed as JSON (truncated/empty-after-strip/corrupt).
+
+    Distinguished from a missing file (which returns ``default`` in both
+    modes) and from a generic ``OSError`` (which still returns ``default``
+    in non-strict mode but is re-raised in strict mode).
+    """
+
+
+def read_json_file(path, default, *, strict=False):
+    """Read and JSON-decode ``path``.
+
+    Missing file -> always returns ``default`` (both modes).
+
+    ``strict=False`` (default, backward-compatible): a corrupt file
+    (``JSONDecodeError``) or an ``OSError`` is logged and ``default`` is
+    returned - the call never raises for these cases.
+
+    ``strict=True``: a ``JSONDecodeError`` raises :class:`CorruptJSONError`
+    (so callers can distinguish "file is broken" from "file is empty /
+    missing"). An ``OSError`` is re-raised as-is. A missing file still
+    returns ``default``.
+    """
+    if not os.path.exists(path):
+        return default
     try:
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8-sig') as f:
-                content = f.read().strip()
-                return json.loads(content) if content else default
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            content = f.read().strip()
+            return json.loads(content) if content else default
     except json.JSONDecodeError as exc:
+        if strict:
+            raise CorruptJSONError(f"Corrupt JSON in {path}: {exc}") from exc
         _log.warning("Corrupt JSON in %s, returning default: %s", path, exc)
     except OSError as exc:
+        if strict:
+            raise
         _log.warning("Failed to read JSON %s, returning default: %s", path, exc)
     return default
 

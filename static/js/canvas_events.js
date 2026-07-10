@@ -2,6 +2,9 @@
 // 依赖全局符号（state.js 声明）：currentImage / currentTool / isDrawing / isPolygonDrawing / startPoint / currentPoint / polygonPoints / imageCache / isResizing / isMoving / resizeHandle / lastMousePos / selectedAnnotationId / currentAnnotations
 // 跨文件调用（classic-script 全局）：redrawCanvas / drawCrosshair（canvas.js）、checkResizeHandleClick / checkAnnotationClick / resizeAnnotation / moveAnnotation（canvas_handles.js）；另调用全局 saveAnnotationsSilent / updateAnnotationList / updateAnnotationListDebounced / getSelectedClass（其它模块）
 
+// ponytail: 递增计数器避免 Date.now() 同毫秒碰撞；保持数字类型，因 annotations.js 用 parseInt 解析 dataset
+let _annIdSeq = Date.now();
+
 function switchTool(tool) {
     // 更新UI状态
     document.querySelectorAll('.tool-btn').forEach(btn => {
@@ -215,7 +218,7 @@ function handleMouseUp(e) {
             const selectedClass = getSelectedClass();
             if (selectedClass) {
                 const annotation = {
-                    id: Date.now(),
+                    id: ++_annIdSeq,
                     class: selectedClass.name,
                     points: [
                         [minX, minY],
@@ -248,7 +251,7 @@ function handleDoubleClick(e) {
         const points = polygonPoints.map(point => [point.x, point.y]);
 
         const annotation = {
-            id: Date.now(),
+            id: ++_annIdSeq,
             class: selectedClass.name,
             points: points,
             type: 'polygon'

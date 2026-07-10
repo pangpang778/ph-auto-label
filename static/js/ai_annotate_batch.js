@@ -159,7 +159,7 @@ async function startBatchAnnotate() {
 
             if (data.error) {
                 failCount += batch.length;
-                resultText.innerHTML += `<div style="color: red;">✗ 批次 ${batchIndex + 1} 失败: ${data.error}</div>`;
+                resultText.innerHTML += `<div style="color: red;">✗ 批次 ${batchIndex + 1} 失败: ${escapeHtml(data.error)}</div>`;
             } else if (data.results) {
                 // 处理每张图片的结果
                 for (const result of data.results) {
@@ -167,13 +167,13 @@ async function startBatchAnnotate() {
                         if (result.count > 0) {
                             successCount++;
                             totalDetected += result.count;
-                            resultText.innerHTML += `<div style="color: green;">✓ ${result.image_name}: ${result.count} 个目标</div>`;
+                            resultText.innerHTML += `<div style="color: green;">✓ ${escapeHtml(result.image_name)}: ${escapeHtml(String(result.count))} 个目标</div>`;
                         } else {
-                            resultText.innerHTML += `<div style="color: gray;">○ ${result.image_name}: 无目标</div>`;
+                            resultText.innerHTML += `<div style="color: gray;">○ ${escapeHtml(result.image_name)}: 无目标</div>`;
                         }
                     } else {
                         failCount++;
-                        resultText.innerHTML += `<div style="color: red;">✗ ${result.image_name}: 失败</div>`;
+                        resultText.innerHTML += `<div style="color: red;">✗ ${escapeHtml(result.image_name)}: 失败</div>`;
                     }
                 }
             }
@@ -183,7 +183,7 @@ async function startBatchAnnotate() {
 
         } catch (error) {
             failCount += batch.length;
-            resultText.innerHTML += `<div style="color: red;">✗ 批次 ${batchIndex + 1} 错误: ${error.message}</div>`;
+            resultText.innerHTML += `<div style="color: red;">✗ 批次 ${batchIndex + 1} 错误: ${escapeHtml(error.message)}</div>`;
         }
 
         processedCount += batch.length;

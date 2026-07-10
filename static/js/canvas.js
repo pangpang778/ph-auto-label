@@ -7,12 +7,18 @@ function redrawCanvas() {
     const ctx = canvas.getContext('2d');
     const container = document.getElementById('imageCanvasContainer');
 
-    // 设置画布尺寸为容器大小
-    canvas.width = container.clientWidth;
-    canvas.height = container.clientHeight;
+    // ponytail: 处理 devicePixelRatio，避免高 DPI 屏幕模糊；CSS 像素尺寸不变，鼠标坐标映射（getBoundingClientRect, CSS 像素）不受影响
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // 清空画布
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // 清空画布（CSS 像素坐标系，setTransform 后 clearRect 用 CSS 尺寸）
+    ctx.clearRect(0, 0, w, h);
 
     if (!currentImage) return;
 
@@ -28,6 +34,12 @@ function redrawCanvas() {
         const img = imageCache.get(currentImage);
         drawImageAndAnnotations(ctx, img, container);
     }
+}
+
+// ponytail: 窗口 resize 时重绘画布；只注册一次（文件顶层 IIFE 守卫）
+if (!window.__canvasResizeBound) {
+    window.__canvasResizeBound = true;
+    window.addEventListener('resize', redrawCanvas);
 }
 
 function drawImageAndAnnotations(ctx, img, container) {

@@ -1,19 +1,21 @@
 """Video-timeline blueprint: videos, timelines, SOP scenario, export-timeline."""
 import csv
-import json
 import os
-import shutil
 import traceback
 from io import StringIO
 
-from flask import Blueprint, Response, jsonify, request, send_file, send_from_directory
+from flask import Blueprint, Response, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
-from app.common.json_store import read_json_file, write_json_file
-from app.common.utils import now_iso
-from app.services.annotation_service import read_classes, sync_object_classes_to_labels
-from app.services.video_timeline_service import load_yaml_file, normalize_timeline_segment, parse_sop_scenario, read_scenario, read_timelines, write_scenario, write_timelines
+from app.repositories.timeline_repo import read_timelines, update_timelines
+from app.services.annotation_service import sync_object_classes_to_labels
+from app.services.video_timeline_service import (
+    normalize_timeline_segment,
+    parse_sop_scenario,
+    read_scenario,
+    write_scenario,
+)
 from plugins.video_inference import list_available_videos, resolve_video_path
 
 bp = Blueprint("video_timeline", __name__)
@@ -114,9 +116,12 @@ def save_timeline(video_name):
     raw_segments = payload if isinstance(payload, list) else payload.get('segments', [])
     segments = [normalize_timeline_segment(seg, video_name) for seg in raw_segments]
     segments.sort(key=lambda x: (x['start_sec'], x['end_sec'], x['step_id']))
-    timelines = read_timelines()
-    timelines[video_name] = segments
-    write_timelines(timelines)
+
+    def _mutate(current):
+        current[video_name] = segments
+        return current, None
+
+    update_timelines(_mutate)
     return jsonify({'message': 'Timeline saved', 'video_name': video_name, 'segments': segments, 'count': len(segments)})
 
 

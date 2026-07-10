@@ -46,21 +46,22 @@ function updateImageList(images) {
         const li = document.createElement('li');
         li.className = 'image-item';
         li.dataset.image = image.name;
-        
+
         // 检查是否有标注
         const hasAnnotations = image.annotation_count > 0;
-        
+
+        const safeName = escapeHtml(image.name);
         li.innerHTML = `
             <div class="image-checkbox">
                 <input type="checkbox" class="image-checkbox-input">
             </div>
             <div class="annotation-status">
-                ${hasAnnotations ? 
-                  '<i class="fas fa-check-circle annotated" title="已标注"></i>' : 
+                ${hasAnnotations ?
+                  '<i class="fas fa-check-circle annotated" title="已标注"></i>' :
                   '<i class="far fa-circle unannotated" title="未标注"></i>'}
             </div>
             <div class="image-index">${index + 1}</div>
-            <div class="image-name" title="${image.name}">${image.name}</div>
+            <div class="image-name" title="${safeName}">${safeName}</div>
         `;
         imageList.appendChild(li);
     });

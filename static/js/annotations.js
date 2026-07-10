@@ -6,9 +6,12 @@ function updateAnnotationList() {
         const li = document.createElement('li');
         li.className = `annotation-item ${annotation.id === selectedAnnotationId ? 'selected' : ''}`;
         li.dataset.annotationId = annotation.id;
+        // ponytail: color validated to #rrggbb before inline style to prevent style injection
+        const rawColor = getClassColor(annotation.class);
+        const safeColor = /^#[0-9a-fA-F]{6}$/.test(rawColor) ? rawColor : '#ff0000';
         li.innerHTML = `
-            <div class="annotation-color" style="background-color: ${getClassColor(annotation.class)};"></div>
-            <span class="annotation-class">${annotation.class}</span>
+            <div class="annotation-color" style="background-color: ${safeColor};"></div>
+            <span class="annotation-class">${escapeHtml(annotation.class)}</span>
             <div class="annotation-actions">
                 <button class="btn btn-small btn-danger delete-annotation-btn" data-index="${index}">
                     <i class="fas fa-trash"></i>

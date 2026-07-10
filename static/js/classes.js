@@ -26,13 +26,15 @@ function updateClassList() {
     classes.forEach((cls, index) => {
         const li = document.createElement('li');
         li.className = 'class-item';
-        // 设置CSS变量，用于背景色
-        li.style.setProperty('--class-color', cls.color);
         // 显示数字序号（1-9显示数字，超过9显示-）
         const shortcutKey = index < 9 ? (index + 1) : '-';
+        // ponytail: safeColor 先校验再用于 CSS 变量与 inline style，两路共用同一校验值
+        const safeColor = /^#[0-9a-fA-F]{6}$/.test(cls.color) ? cls.color : '#ff0000';
+        // 设置CSS变量，用于背景色
+        li.style.setProperty('--class-color', safeColor);
         li.innerHTML = `
             <span class="class-shortcut">${shortcutKey}</span>
-            <span class="class-name">${cls.name}</span>
+            <span class="class-name">${escapeHtml(cls.name)}</span>
             <div class="class-actions">
                 <button class="class-edit-btn" data-index="${index}">
                     <i class="fas fa-pencil-alt"></i>

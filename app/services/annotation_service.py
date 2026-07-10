@@ -10,7 +10,6 @@ callers (e.g. training_service) use ``read_annotations()`` / ``read_classes()``
 here, never ``app.repositories.annotation_repo`` directly.
 """
 import hashlib
-import json
 import logging
 import os
 import shutil
@@ -26,6 +25,7 @@ from app.repositories.annotation_repo import (
     read_annotations as _read_annotations_repo,
     read_classes as _read_classes_repo,
     update_annotations as _update_annotations_repo,
+    update_classes as _update_classes_repo,
     write_annotations as _write_annotations_repo,
     write_classes as _write_classes_repo,
 )
@@ -76,6 +76,11 @@ def write_annotations(data: dict) -> None:
 def update_annotations(mutator, *, timeout=10):
     """Atomic RMW under the cross-process filelock (delegates to repo)."""
     return _update_annotations_repo(mutator, timeout=timeout)
+
+
+def update_classes(mutator, *, timeout=10):
+    """Atomic RMW for classes.json under the cross-process filelock (delegates to repo)."""
+    return _update_classes_repo(mutator, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -225,9 +230,16 @@ def delete_images(image_names):
 
 
 def save_image_annotations(image_name, data):
-    """Persist ``data`` as the annotations for ``image_name`` under a file lock.
+    """Persist ``data`` as the annotations for ``image_name`` via atomic RMW.
 
-    Returns a ``metrics`` dict (all int ms values):
+    Uses ``update_annotations(mutator)`` so the read-backup-write happens under
+    one cross-process filelock acquisition (the original hand-rolled lock +
+    read + backup + atomic-write raced with concurrent batch inference writes;
+    json_store.write_json_file is already atomic: tmp+fsync+replace, so the
+    separate verify-by-reread step was redundant).
+
+    Returns a ``metrics`` dict (all int ms values, stable keys locked by
+    ``test_char_annotation_flow.test_post_annotations_response_shape_and_metrics_headers``):
       ``lock_wait_ms, read_json_ms, backup_ms, write_verify_replace_ms, total_ms``.
 
     Raises ``AnnotationError(500)`` on read/write failure, ``AnnotationError(503)``
@@ -236,27 +248,49 @@ def save_image_annotations(image_name, data):
     req_started = time.perf_counter()
     metrics = dict.fromkeys(
         ('lock_wait_ms', 'read_json_ms', 'backup_ms', 'write_verify_replace_ms', 'total_ms'), 0)
-    lock_file = PATHS['annotations'] + '.lock'
-    lock = filelock.FileLock(lock_file, timeout=10)
 
+    # ponytail: metrics filled inside mutator via closure; read/backup happen
+    # under the lock so the backup reflects the exact pre-image state.
+    def _mutate(current):
+        read_started = time.perf_counter()
+        # current already read by update_annotations under the lock; emulate
+        # read_json_ms as the time spent touching the in-memory dict here.
+        metrics['read_json_ms'] = int((time.perf_counter() - read_started) * 1000)
+
+        if os.path.exists(PATHS['annotations']):
+            try:
+                backup_started = time.perf_counter()
+                shutil.copy2(PATHS['annotations'], PATHS['annotations'] + '.bak')
+                metrics['backup_ms'] = int((time.perf_counter() - backup_started) * 1000)
+            except Exception as e:
+                print(f"备份失败: {e}")
+
+        current[image_name] = data
+        return current, None
+
+    lock_wait_started = time.perf_counter()
     try:
-        lock_wait_started = time.perf_counter()
-        with lock:
-            metrics['lock_wait_ms'] = int((time.perf_counter() - lock_wait_started) * 1000)
-            annotations = _read_existing_annotations_or_raise(metrics)
-            _backup_existing_annotations(metrics)
-            annotations[image_name] = data
-            _atomic_write_verified(image_name, annotations, metrics)
-            metrics['total_ms'] = int((time.perf_counter() - req_started) * 1000)
+        _update_annotations_repo(_mutate, timeout=10)
     except filelock.Timeout:
+        metrics['lock_wait_ms'] = int((time.perf_counter() - lock_wait_started) * 1000)
         metrics['total_ms'] = int((time.perf_counter() - req_started) * 1000)
         logger.warning(
             '[annotations.save.timeout] image=%s waited_ms=%d total_ms=%d',
             image_name,
-            int((time.perf_counter() - lock_wait_started) * 1000),
+            metrics['lock_wait_ms'],
             metrics['total_ms'],
         )
         raise AnnotationError(503, '文件正在被其他操作使用，请稍后重试')
+    except (OSError, ValueError) as e:
+        metrics['total_ms'] = int((time.perf_counter() - req_started) * 1000)
+        print(f"保存标注文件失败: {e}")
+        raise AnnotationError(500, f'保存失败: {str(e)}')
+
+    metrics['lock_wait_ms'] = int((time.perf_counter() - lock_wait_started) * 1000)
+    # write happens inside update_annotations -> write_json_file (atomic); no
+    # separate verify-by-reread step, so this stays 0 (key preserved for the
+    # locked response-shape contract).
+    metrics['total_ms'] = int((time.perf_counter() - req_started) * 1000)
 
     logger.info(
         '[annotations.save] image=%s lock_wait_ms=%d read_json_ms=%d backup_ms=%d '
@@ -270,59 +304,3 @@ def save_image_annotations(image_name, data):
         len(data) if isinstance(data, list) else -1,
     )
     return metrics
-
-
-def _read_existing_annotations_or_raise(metrics):
-    """Read annotations.json (utf-8). Raises AnnotationError(500) on failure."""
-    annotations = {}
-    if os.path.exists(PATHS['annotations']):
-        try:
-            read_started = time.perf_counter()
-            with open(PATHS['annotations'], 'r', encoding='utf-8') as f:
-                content = f.read()
-                if content.strip():
-                    annotations = json.loads(content)
-            metrics['read_json_ms'] = int((time.perf_counter() - read_started) * 1000)
-        except json.JSONDecodeError as e:
-            print(f"JSON解析失败: {e}")
-            raise AnnotationError(500, f'标注文件格式错误，无法保存: {str(e)}')
-        except Exception as e:
-            print(f"读取标注文件失败: {e}")
-            raise AnnotationError(500, f'读取标注文件失败: {str(e)}')
-    return annotations
-
-
-def _backup_existing_annotations(metrics):
-    """Back up annotations.json to .bak (best-effort, preserves last good copy)."""
-    if os.path.exists(PATHS['annotations']):
-        backup_file = PATHS['annotations'] + '.bak'
-        try:
-            backup_started = time.perf_counter()
-            shutil.copy2(PATHS['annotations'], backup_file)
-            metrics['backup_ms'] = int((time.perf_counter() - backup_started) * 1000)
-        except Exception as e:
-            print(f"备份失败: {e}")
-
-
-def _atomic_write_verified(image_name, annotations, metrics):
-    """Write annotations to a temp file, verify by re-reading, then replace.
-
-    Raises AnnotationError(500) on write/verify failure (temp file cleaned up).
-    """
-    temp_file = PATHS['annotations'] + '.tmp'
-    try:
-        write_started = time.perf_counter()
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(annotations, f, indent=2, ensure_ascii=False)
-        with open(temp_file, 'r', encoding='utf-8') as f:
-            json.load(f)  # verify JSON is valid
-        if os.path.exists(PATHS['annotations']):
-            os.replace(temp_file, PATHS['annotations'])
-        else:
-            os.rename(temp_file, PATHS['annotations'])
-        metrics['write_verify_replace_ms'] = int((time.perf_counter() - write_started) * 1000)
-    except Exception as e:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-        print(f"写入标注文件失败: {e}")
-        raise AnnotationError(500, f'保存失败: {str(e)}')

@@ -5,9 +5,15 @@ All annotation writes go through the SAME cross-process ``filelock``
 acquires, so concurrent writers (single-image save vs. batch inference vs.
 delete) can no longer clobber each other's read-modify-write cycles.
 
+Classes (``classes.json``) now follow the same pattern under its own
+``classes.json.lock``: :func:`update_classes` is the atomic RMW entry,
+:func:`write_classes` guards the full overwrite, :func:`read_classes` is a
+lock-free read for callers that only inspect.
+
 Callers that read-then-modify-then-write MUST use :func:`update_annotations`
-so the read and write happen under one lock acquisition; a bare
-``read_annotations()`` + ``write_annotations()`` pair is NOT atomic.
+(or :func:`update_classes`) so the read and write happen under one lock
+acquisition; a bare ``read_annotations()`` + ``write_annotations()`` pair is
+NOT atomic.
 """
 import filelock
 
@@ -15,6 +21,7 @@ from app.common.config import PATHS
 from app.common.json_store import read_json_file, write_json_file
 
 _ANNOTATIONS_LOCK_PATH = PATHS['annotations'] + '.lock'
+_CLASSES_LOCK_PATH = PATHS['classes'] + '.lock'
 
 
 def read_annotations() -> dict:
@@ -57,4 +64,31 @@ def read_classes() -> list:
 
 
 def write_classes(data: list) -> None:
-    write_json_file(PATHS['classes'], data)
+    """Overwrite classes.json under the cross-process lock.
+
+    Prefer :func:`update_classes` for read-modify-write flows; this helper
+    only guards the write itself (callers that read first still race).
+    """
+    lock = filelock.FileLock(_CLASSES_LOCK_PATH, timeout=10)
+    with lock:
+        write_json_file(PATHS['classes'], data)
+
+
+def update_classes(mutator, *, timeout=10):
+    """Atomically read-modify-write classes.json under the file lock.
+
+    ``mutator(current: list) -> (new_data, result)``: receives the current
+    classes list and returns ``(new_data, result)`` where ``new_data`` is the
+    list to persist (or ``None`` to skip the write, e.g. read-only check) and
+    ``result`` is any value returned to the caller.
+
+    Raises ``filelock.Timeout`` if the lock cannot be acquired within
+    ``timeout`` seconds - callers map this to HTTP 503.
+    """
+    lock = filelock.FileLock(_CLASSES_LOCK_PATH, timeout=timeout)
+    with lock:
+        current = read_json_file(PATHS['classes'], [])
+        new_data, result = mutator(current)
+        if new_data is not None:
+            write_json_file(PATHS['classes'], new_data)
+        return result

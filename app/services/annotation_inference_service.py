@@ -36,9 +36,7 @@ from app.services import models_service
 from app.services.annotation_service import (
     AnnotationError,
     assign_class_colors_and_ids,
-    read_classes,
-    write_annotations,
-    write_classes,
+    update_classes,
 )
 from app.services.training_service import resolve_training_device
 
@@ -81,10 +79,9 @@ def run_yolo_single(data):
     output = _run_inference(python_path, script, install_path, env, timeout=60)
     annotations = _extract_json(output, include_output_fallback=True)
 
-    existing_classes = read_classes()
-    new_classes_added = assign_class_colors_and_ids(annotations, existing_classes)
-    if new_classes_added:
-        write_classes(existing_classes)
+    # ponytail: classes RMW under one lock; assign mutates the locked-in
+    # current list so a concurrent single-image run cannot lose a class.
+    new_classes_added = _merge_classes_for(annotations)
 
     return {'success': True, 'annotations': annotations, 'new_classes_added': new_classes_added}
 
@@ -121,23 +118,24 @@ def run_yolo_batch(data):
 def _merge_batch_results(all_annotations, image_paths, valid_image_names):
     """Assign colors/ids, merge into persisted annotations, build summary.
 
-    The read-modify-write of ``annotations.json`` happens atomically under
-    one ``update_annotations`` lock acquisition (C2). Existing AUTO
-    annotations for an image are replaced (preserving manual ones) so a
-    re-run does not double-append detections (MEDIUM).
+    Classes RMW (read-assign-write) happens atomically under one
+    ``update_classes`` lock acquisition (H5/H10); annotations RMW under one
+    ``update_annotations`` lock (C2). Existing AUTO annotations for an image
+    are replaced (preserving manual ones) so a re-run does not double-append
+    detections (MEDIUM). The two JSON stores cannot share a cross-file
+    transaction; the window between the two locks is accepted (single
+    inference run, not a hot concurrent path for classes).
     """
-    existing_classes = read_classes()
-    new_classes_added = False
+    # Pre-collect per-image annotations (no store access yet).
+    per_image = [
+        (valid_image_names[i], all_annotations.get(img_path, []))
+        for i, img_path in enumerate(image_paths)
+    ]
 
-    # Pre-compute per-image results outside the annotation lock so the
-    # critical section only touches annotations.json (classes have their
-    # own store). assign_class_colors_and_ids mutates existing_classes.
-    per_image = []
-    for i, img_path in enumerate(image_paths):
-        img_name = valid_image_names[i]
-        annotations = all_annotations.get(img_path, [])
-        new_classes_added = assign_class_colors_and_ids(annotations, existing_classes) or new_classes_added
-        per_image.append((img_name, annotations))
+    # Assign colors/ids + merge new classes under the classes lock so a
+    # concurrent single-image run cannot lose a class (H5/H10).
+    new_classes_added = _merge_classes_for(
+        [ann for _name, anns in per_image for ann in anns])
 
     def _mutate(current):
         results_summary = []
@@ -153,14 +151,31 @@ def _merge_batch_results(all_annotations, image_paths, valid_image_names):
     except filelock.Timeout:
         raise AnnotationError(503, '文件正在被其他操作使用，请稍后重试')
 
-    if new_classes_added:
-        write_classes(existing_classes)
     return {
         'success': True,
         'results': results_summary,
         'total_processed': len(results_summary),
         'new_classes_added': new_classes_added,
     }
+
+
+def _merge_classes_for(annotations):
+    """Run assign_class_colors_and_ids against the locked-in current classes.
+
+    Returns ``new_classes_added`` (bool). The classes read-assign-write is
+    atomic under ``update_classes`` (H5/H10): the mutator receives the
+    current classes list under the filelock, runs assign (which mutates it
+    in place, setting color/id on each annotation and appending any new
+    class), and persists the result. Only writes when a new class was added.
+    """
+    def _mutate(current_classes):
+        added = assign_class_colors_and_ids(annotations, current_classes)
+        return (current_classes if added else None, added)
+
+    try:
+        return update_classes(_mutate, timeout=10)
+    except filelock.Timeout:
+        raise AnnotationError(503, '文件正在被其他操作使用，请稍后重试')
 
 
 def _resolve_model_name(model_name):

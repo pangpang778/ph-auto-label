@@ -20,11 +20,14 @@ import numpy as np
 from PIL import Image
 
 from app.common.config import PATHS
-from app.common.json_store import read_json_file, write_json_file
 from app.common.utils import now_iso
 from app.services.annotation_service import read_annotations, read_classes
-from app.repositories.train_jobs_repo import TRAIN_JOBS_LOCK, read_train_jobs, upsert_train_job, write_train_jobs
-from app.repositories.training_splits_repo import TRAINING_SPLITS_LOCK, load_split_profile, read_training_splits, write_training_splits
+from app.repositories.train_jobs_repo import read_train_jobs, recover_orphaned_jobs_atomic, upsert_train_job
+from app.repositories.training_splits_repo import (
+    delete_split_profile_atomic,
+    load_split_profile,
+    update_split_profile,
+)
 from app.services import models_service
 from app.services.training_job_runner import (
     _extract_metrics_from_results_csv,
@@ -126,7 +129,11 @@ def _image_matches_class_filter(image_name: str, annotations: dict, class_filter
 def collect_training_candidates(split_config: dict | None = None) -> dict:
     config = normalize_split_config(split_config)
     classes = read_classes()
-    class_names = [c.get('name') for c in classes if c.get('name')]
+    # Deterministic class ordering: sort by name so the class<->id mapping is
+    # stable across rebuilds regardless of classes.json array order. Without
+    # this, incremental training could remap ids and silently corrupt the
+    # learned head. MEDIUM (class-id drift) fix.
+    class_names = sorted(set(c.get('name') for c in classes if c.get('name')))
     annotations = read_annotations()
     image_names = sorted(name for name in os.listdir(PATHS['uploads']) if name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')))
     annotated = [name for name in image_names if annotations.get(name)]
@@ -162,10 +169,22 @@ def assign_training_splits(candidates: list[str], split_config: dict | None = No
     candidate_set = set(candidates)
     requested = config.get("assignments", {})
     if any(requested.get(split) for split in ("train", "val", "test")):
+        # Requested assignments are treated as manually pinned items - they are
+        # honored as-is, then the *leftover* (un-pinned) candidates are
+        # deterministically shuffled and distributed across all three splits
+        # by ratio. This lets newly added images reach val/test instead of the
+        # old behavior where every leftover was dumped into train (val/test
+        # froze once an assignment was persisted). C1 fix.
         assigned = {split: [name for name in requested.get(split, []) if name in candidate_set] for split in ("train", "val", "test")}
         used = set(assigned["train"] + assigned["val"] + assigned["test"])
         leftovers = [name for name in candidates if name not in used]
-        assigned["train"].extend(leftovers)
+        random.Random(42).shuffle(leftovers)
+        n = len(leftovers)
+        n_train = round(n * config["train_ratio"])
+        n_val = round(n * config["val_ratio"])
+        assigned["train"].extend(leftovers[:n_train])
+        assigned["val"].extend(leftovers[n_train:n_train + n_val])
+        assigned["test"].extend(leftovers[n_train + n_val:])
         return assigned
 
     shuffled = list(candidates)
@@ -214,10 +233,12 @@ def build_split_summary(split_config: dict | None = None, persist_assignments: b
 def save_split_profile(split_config: dict) -> dict:
     summary = build_split_summary(split_config, persist_assignments=True)
     profile_id = summary["split_config"].get("profile_id") or "default"
-    with TRAINING_SPLITS_LOCK:
-        profiles = read_json_file(PATHS['training_splits'], {})
+
+    def _mutator(profiles):
         profiles[profile_id] = summary
-        write_json_file(PATHS['training_splits'], profiles)
+        return profiles, summary
+
+    update_split_profile(profile_id, _mutator)
     return summary
 
 
@@ -301,14 +322,7 @@ def build_yolo_training_dataset(work_dir: str, split_config: dict | None = None)
             _write_yolo_label_file(label_path, annotations.get(image_name, []), class_to_id, src)
 
     data_yaml = os.path.join(dataset_root, "data.yaml")
-    with open(data_yaml, "w", encoding="utf-8") as f:
-        dataset_root_abs = os.path.abspath(dataset_root).replace("\\", "/")
-        f.write(f"path: {dataset_root_abs}\n")
-        f.write("train: train/images\n")
-        f.write("val: val/images\n")
-        f.write("test: test/images\n\n")
-        f.write(f"nc: {len(class_names)}\n")
-        f.write(f"names: {class_names}\n")
+    _write_data_yaml(data_yaml, dataset_root, class_names)
 
     return {
         "dataset_root": dataset_root,
@@ -321,6 +335,57 @@ def build_yolo_training_dataset(work_dir: str, split_config: dict | None = None)
         "split_config": candidates["config"],
         "assignments": splits,
     }
+
+
+def _write_data_yaml(data_yaml: str, dataset_root: str, class_names: list[str]) -> None:
+    """Write data.yaml via yaml.safe_dump (MEDIUM: avoid f-string YAML)."""
+    import yaml
+    dataset_root_abs = os.path.abspath(dataset_root).replace("\\", "/")
+    payload = {
+        "path": dataset_root_abs,
+        "train": "train/images",
+        "val": "val/images",
+        "test": "test/images",
+        "nc": len(class_names),
+        "names": class_names,
+    }
+    with open(data_yaml, "w", encoding="utf-8") as f:
+        # default_flow_style=False emits block style; sort_keys=False keeps
+        # a stable, human-readable key order (Python dict insertion order).
+        yaml.safe_dump(payload, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+
+def _check_incremental_class_order(base_model: str, class_names: list[str]) -> str | None:
+    """Best-effort: warn if an incremental base model's class names disagree.
+
+    Returns a warning string when the base model is a real weights file whose
+    loaded ``names`` mapping is incompatible (different class set/order) with
+    the current ``class_names``. Returns ``None`` when there is nothing to
+    flag, or when reading the model fails (never blocks training).
+    """
+    if not base_model or not os.path.isfile(base_model):
+        return None
+    try:
+        from ultralytics import YOLO
+        names = YOLO(base_model).names
+    except Exception:
+        # Can't read names (e.g. base is a pretrained .pt without our head) -
+        # not actionable, stay silent.
+        return None
+    if not isinstance(names, dict):
+        return None
+    base_names = [str(v) for v in names.values()]
+    if sorted(base_names) != sorted(class_names):
+        return (
+            f"增量训练 base 模型类别集 {base_names} 与当前类别集 {class_names} 不一致，"
+            "可能导致检测头重置或类别错位；建议保持类别集稳定。"
+        )
+    if base_names != class_names:
+        return (
+            f"增量训练 base 模型类别顺序 {base_names} 与当前 {class_names} 顺序不同，"
+            "已按名称确定性排序对齐当前数据，请确认与历史训练一致。"
+        )
+    return None
 
 
 
@@ -340,9 +405,11 @@ def build_train_job(payload, mode, readiness, active):
             base_model = active.get("model_path")
         else:
             base_model = "yolo11n.pt"
+    epochs = _validate_int_param(payload.get("epochs", 30), "epochs", 1, 1000)
+    imgsz = _validate_imgsz(payload.get("imgsz", 640))
+    batch = _validate_int_param(payload.get("batch", 8), "batch", 1, 512)
     job_id = f"train_{uuid.uuid4().hex[:10]}"
-    epochs = int(payload.get("epochs", 30))
-    return {
+    job = {
         "id": job_id,
         "mode": mode,
         "status": "queued",
@@ -352,8 +419,8 @@ def build_train_job(payload, mode, readiness, active):
         "updated_at": now_iso(),
         "base_model": base_model,
         "epochs": epochs,
-        "imgsz": int(payload.get("imgsz", 640)),
-        "batch": int(payload.get("batch", 8)),
+        "imgsz": imgsz,
+        "batch": batch,
         "device": resolve_training_device(payload.get("device", "auto")),
         "annotated_images": readiness["annotated_images"],
         "total_images": readiness["total_images"],
@@ -368,6 +435,40 @@ def build_train_job(payload, mode, readiness, active):
         "epoch": 0,
         "total_epochs": epochs,
     }
+    # Best-effort incremental class-order check (MEDIUM). Non-fatal: only adds
+    # a warning field; never blocks the job from queueing.
+    if mode == "incremental":
+        try:
+            classes = read_classes()
+            names = sorted(set(c.get('name') for c in classes if c.get('name')))
+            warning = _check_incremental_class_order(base_model, names)
+            if warning:
+                job["class_order_warning"] = warning
+        except Exception:
+            pass
+    return job
+
+
+def _validate_int_param(raw, name: str, lo: int, hi: int) -> int:
+    """Coerce ``raw`` to int and range-check it (H13). Raises ValueError -> 400."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} 参数必须为整数")
+    if value < lo or value > hi:
+        raise ValueError(f"{name} 必须在 {lo}-{hi}")
+    return value
+
+
+def _validate_imgsz(raw) -> int:
+    """YOLO requires imgsz to be a positive multiple of 32 (H13)."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("imgsz 参数必须为整数")
+    if value <= 0 or value % 32 != 0:
+        raise ValueError("imgsz 必须是 32 的正整数倍")
+    return value
 
 
 def resolve_training_device(requested_device):
@@ -416,36 +517,16 @@ def update_train_job(job: dict) -> None:
 
 def delete_split_profile(profile_id: str = "default") -> None:
     """Remove a persisted split profile. No-op if the profile is absent."""
-    with TRAINING_SPLITS_LOCK:
-        profiles = read_json_file(PATHS['training_splits'], {})
-        profiles.pop(profile_id, None)
-        write_json_file(PATHS['training_splits'], profiles)
+    delete_split_profile_atomic(profile_id)
 
 
 
 def recover_orphaned_jobs() -> int:
-    """Mark jobs left in ``status == 'running'`` as ``failed`` on startup.
+    """Mark jobs left ``running`` or ``queued`` as ``failed`` on startup.
 
-    A crash mid-training leaves a job stuck in ``running`` forever. Called once
-    at app startup (wired by the factory). Idempotent: only ``running`` jobs are
-    touched - ``queued``/``completed``/``failed`` are left alone. Returns the
-    number of jobs recovered. Never raises on a missing/empty store.
+    A crash mid-training (or mid-queue) leaves a job stuck forever. Called once
+    at app startup (wired by the factory). Delegates to the atomic
+    read-modify-write in the repo so concurrent restarts cannot double-recover
+    or clobber each other. Returns the number of jobs recovered; never raises.
     """
-    try:
-        jobs = read_train_jobs()
-    except Exception:
-        return 0
-    if not jobs:
-        return 0
-    recovered = 0
-    changed = False
-    for job in jobs:
-        if job.get("status") == "running":
-            job["status"] = "failed"
-            job["message"] = "进程重启时中断"
-            job["updated_at"] = now_iso()
-            recovered += 1
-            changed = True
-    if changed:
-        write_train_jobs(jobs)
-    return recovered
+    return recover_orphaned_jobs_atomic()

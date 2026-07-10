@@ -6,6 +6,7 @@ from flask import Blueprint, Response, jsonify, render_template, request, send_f
 from werkzeug.utils import secure_filename
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
+from app.services.models_service import list_installed_models as models_service_list_installed_models
 from app.services.video_test_service import _parse_classes, get_active_model, get_models_dir, parse_video_test_params
 from plugins.sam3_service import sam3_service
 from plugins.video_inference import UPLOAD_VIDEO_DIR, list_available_videos, resolve_video_path, video_inference_service
@@ -61,9 +62,8 @@ def video_test_yolo_models():
     models = [{'name': 'yolo11n.pt (COCO 80类 预训练)', 'value': 'yolo11n.pt'}]
     try:
         md = get_models_dir()
-        for fn in sorted(os.listdir(md)):
-            if fn.endswith('.pt'):
-                models.append({'name': f'{fn} (已训练)', 'value': os.path.join(md, fn)})
+        for fn in models_service_list_installed_models():
+            models.append({'name': f'{fn} (已训练)', 'value': os.path.join(md, fn)})
     except Exception:
         pass
     active = get_active_model()
@@ -71,10 +71,13 @@ def video_test_yolo_models():
     return jsonify({'models': models, 'active': preferred})
 
 
-@bp.route('/api/video-test/start', methods=['POST'])
-def video_test_start():
-    """启动视频推理任务。"""
-    data = request.json or {}
+def _dispatch_video_test(data, launcher):
+    """Shared validation + launch for video-test start endpoints.
+
+    ``launcher`` is ``video_inference_service.start_job`` or
+    ``start_stream_session`` (same signature). Returns the launcher's result
+    dict on success, or a ``(jsonify_body, status)`` error tuple.
+    """
     try:
         name, engine, target_fps, conf = parse_video_test_params(data)
     except ValueError as exc:
@@ -90,12 +93,20 @@ def video_test_start():
         classes = _parse_classes(data.get('classes'))
         if not classes:
             return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
-        job = video_inference_service.start_job(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
-    else:
-        model_path = data.get('model') or 'yolo11n.pt'
-        job = video_inference_service.start_job(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
+        return launcher(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
 
-    return jsonify({'job_id': job['id'], 'status': job['status']})
+    model_path = data.get('model') or 'yolo11n.pt'
+    return launcher(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
+
+
+@bp.route('/api/video-test/start', methods=['POST'])
+def video_test_start():
+    """启动视频推理任务。"""
+    data = request.json or {}
+    result = _dispatch_video_test(data, video_inference_service.start_job)
+    if isinstance(result, tuple):
+        return result
+    return jsonify({'job_id': result['id'], 'status': result['status']})
 
 
 @bp.route('/api/video-test/stream/<job_id>')
@@ -125,27 +136,10 @@ def video_test_job(job_id):
 def video_test_stream_start():
     """启动流式 MJPEG 推理会话（边算边播）。"""
     data = request.json or {}
-    try:
-        name, engine, target_fps, conf = parse_video_test_params(data)
-    except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-
-    path = resolve_video_path(name)
-    if not path:
-        return jsonify({'error': f'视频不存在: {name}'}), 400
-
-    if engine == 'sam3':
-        if not sam3_service.is_loaded:
-            return jsonify({'error': 'SAM3 模型未加载，请先确认模型已就绪'}), 503
-        classes = _parse_classes(data.get('classes'))
-        if not classes:
-            return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
-        res = video_inference_service.start_stream_session(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
-    else:
-        model_path = data.get('model') or 'yolo11n.pt'
-        res = video_inference_service.start_stream_session(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
-
-    return jsonify(res)
+    result = _dispatch_video_test(data, video_inference_service.start_stream_session)
+    if isinstance(result, tuple):
+        return result
+    return jsonify(result)
 
 
 @bp.route('/api/video-test/stream/frames/<sid>')

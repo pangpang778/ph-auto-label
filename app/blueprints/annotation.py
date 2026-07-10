@@ -5,9 +5,9 @@ only Flask-bound concerns (request parsing, jsonify, send_from_directory,
 response headers); business logic lives in Flask-context-free services.
 """
 import json
+import logging
 import os
 import subprocess
-import traceback
 
 from flask import Blueprint, jsonify, render_template, request, send_from_directory
 
@@ -24,11 +24,16 @@ from app.services.annotation_service import (
     AnnotationError,
     delete_images as delete_images_service,
     list_images,
+    read_annotations,
+    read_classes,
     save_image_annotations,
+    write_classes,
 )
 from plugins.sam3_service import sam3_service
 
 bp = Blueprint("annotation", __name__)
+
+logger = logging.getLogger(__name__)
 
 _ANNOTATION_METRIC_HEADERS = (
     ('lock_wait_ms', 'X-Annotations-Lock-Wait-Ms'),
@@ -57,11 +62,7 @@ def index():
 @bp.route('/api/classes')
 def get_classes():
     """获取所有类别"""
-    classes = []
-    if os.path.exists(PATHS['classes']):
-        with open(PATHS['classes'], 'r') as f:
-            classes = json.load(f)
-    return jsonify(classes)
+    return jsonify(read_classes())
 
 
 @bp.route('/api/classes', methods=['POST'])
@@ -70,8 +71,7 @@ def save_classes():
     data = request.json
     if not isinstance(data, list):
         return jsonify({'error': 'classes 必须是列表'}), 400
-    with open(PATHS['classes'], 'w') as f:
-        json.dump(data, f, indent=2)
+    write_classes(data)
     return jsonify({'message': 'Classes saved successfully'})
 
 
@@ -132,8 +132,11 @@ def upload_labelme_dataset():
     try:
         files = [(f.filename or '', f.read()) for f in request.files.getlist('files')]
         return jsonify(annotation_import_service.import_labelme_dataset(files))
-    except Exception as e:
-        return jsonify({'error': f'Failed to process LabelMe dataset: {str(e)}'}), 500
+    except PathSafetyError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception:
+        logger.exception("Failed to process LabelMe dataset")
+        return jsonify({'error': 'Failed to process LabelMe dataset'}), 500
 
 
 @bp.route('/api/upload/video', methods=['POST'])
@@ -154,26 +157,15 @@ def upload_video():
         return jsonify({'message': 'Video frames extracted successfully', 'frames': frames, 'count': len(frames)})
     except ValueError:
         return jsonify({'error': 'frame_interval 必须是整数'}), 400
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({'error': f'Failed to process video: {str(e)}'}), 500
+    except Exception:
+        logger.exception("Failed to process video")
+        return jsonify({'error': 'Failed to process video'}), 500
 
 
 @bp.route('/api/annotations/<image_name>')
 def get_annotations(image_name):
     """获取特定图片的标注"""
-    annotations = {}
-    if os.path.exists(PATHS['annotations']):
-        try:
-            with open(PATHS['annotations'], 'r', encoding='utf-8') as f:
-                annotations = json.load(f)
-        except json.JSONDecodeError:
-            annotations = {}
-        except Exception as e:
-            print(f"Error reading annotations file: {e}")
-            annotations = {}
-    image_annotations = annotations.get(image_name, [])
-    return jsonify(image_annotations)
+    return jsonify(read_annotations().get(image_name, []))
 
 
 @bp.route('/api/annotations/<image_name>', methods=['POST'])
@@ -201,10 +193,9 @@ def ai_annotate():
         return jsonify({'error': '模型推理超时'}), 500
     except json.JSONDecodeError as e:
         return jsonify({'error': f'解析模型输出失败: {str(e)}'}), 500
-    except Exception as e:
-        print(f"AI标注错误: {str(e)}")
-        print(traceback.format_exc())
-        return jsonify({'error': f'AI标注失败: {str(e)}'}), 500
+    except Exception:
+        logger.exception("AI标注错误")
+        return jsonify({'error': 'AI标注失败'}), 500
 
 
 @bp.route('/api/ai-annotate-batch', methods=['POST'])
@@ -218,10 +209,9 @@ def ai_annotate_batch():
         return jsonify({'error': '批量推理超时'}), 500
     except json.JSONDecodeError as e:
         return jsonify({'error': f'解析模型输出失败: {str(e)}'}), 500
-    except Exception as e:
-        print(f"批量AI标注错误: {str(e)}")
-        print(traceback.format_exc())
-        return jsonify({'error': f'批量AI标注失败: {str(e)}'}), 500
+    except Exception:
+        logger.exception("批量AI标注错误")
+        return jsonify({'error': '批量AI标注失败'}), 500
 
 
 @bp.route('/api/sam3/status')
@@ -242,10 +232,9 @@ def ai_annotate_sam3():
         return jsonify(annotation_sam3_service.run_sam3_single(request.json or {}))
     except AnnotationError as exc:
         return _annotation_error_response(exc)
-    except Exception as e:
-        print(f"SAM3标注错误: {str(e)}")
-        print(traceback.format_exc())
-        return jsonify({'error': f'SAM3标注失败: {str(e)}'}), 500
+    except Exception:
+        logger.exception("SAM3标注错误")
+        return jsonify({'error': 'SAM3标注失败'}), 500
 
 
 @bp.route('/api/ai-annotate-sam3-batch', methods=['POST'])
@@ -255,10 +244,9 @@ def ai_annotate_sam3_batch():
         return jsonify(annotation_sam3_service.run_sam3_batch(request.json or {}))
     except AnnotationError as exc:
         return _annotation_error_response(exc)
-    except Exception as e:
-        print(f"批量SAM3标注错误: {str(e)}")
-        print(traceback.format_exc())
-        return jsonify({'error': f'批量SAM3标注失败: {str(e)}'}), 500
+    except Exception:
+        logger.exception("批量SAM3标注错误")
+        return jsonify({'error': '批量SAM3标注失败'}), 500
 
 
 @bp.route('/api/export', methods=['POST'])
@@ -272,7 +260,6 @@ def export_dataset():
         )
     except AnnotationError as exc:
         return _annotation_error_response(exc)
-    except Exception as e:
-        print(f"Export error: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        logger.exception("Export error")
+        return jsonify({'error': '导出数据集失败'}), 500

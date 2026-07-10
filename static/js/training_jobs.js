@@ -56,7 +56,20 @@ function showTrainLogs(jobId) {
 
 function showTrainResultsImage(jobId) {
     const url = `/api/train/jobs/${encodeURIComponent(jobId)}/results-image`;
-    openTrainArtifactModal('训练结果图', `<div class="train-image-wrap"><img src="${url}" alt="训练结果图" onerror="this.closest('.train-image-wrap').innerHTML='<span class=&quot;artifact-missing&quot;>results.png 不存在或接口未就绪</span>'"></div>`);
+    openTrainArtifactModal('训练结果图', '');
+    const wrap = document.createElement('div');
+    wrap.className = 'train-image-wrap';
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = '训练结果图';
+    // ponytail: 用 addEventListener 替代内联 onerror，避免内联 JS / CSP 风险
+    img.addEventListener('error', () => {
+        wrap.innerHTML = '<span class="artifact-missing">results.png 不存在或接口未就绪</span>';
+    });
+    wrap.appendChild(img);
+    setTrainArtifactBody('');
+    const body = document.getElementById('trainArtifactBody');
+    if (body) body.appendChild(wrap);
 }
 
 function showNativeYoloImages(jobId) {
@@ -67,20 +80,36 @@ function showNativeYoloImages(jobId) {
                 setTrainArtifactBody('<div class="timeline-summary artifact-missing">暂未找到 YOLO 原生训练图，训练完成后会生成 results.png、混淆矩阵、PR/F1 曲线和 batch 预览图。</div>');
                 return;
             }
-            const cards = data.images.map(image => {
-                const name = escapeHtml(image.name || '');
-                const title = escapeHtml(image.title || image.name || '训练图');
-                const src = `/api/train/jobs/${encodeURIComponent(jobId)}/native-images/${encodeURIComponent(image.name || '')}`;
-                return `
-                    <figure class="native-yolo-card">
-                        <figcaption>${title}<span>${name}</span></figcaption>
-                        <a href="${src}" target="_blank" rel="noopener noreferrer">
-                            <img src="${src}" alt="${title}" loading="lazy" onerror="this.closest('.native-yolo-card').classList.add('image-missing')">
-                        </a>
-                    </figure>
-                `;
-            }).join('');
-            setTrainArtifactBody(`<div class="native-yolo-grid">${cards}</div>`);
+            const grid = document.createElement('div');
+            grid.className = 'native-yolo-grid';
+            data.images.forEach(image => {
+                const name = image.name || '';
+                const title = image.title || name || '训练图';
+                const src = `/api/train/jobs/${encodeURIComponent(jobId)}/native-images/${encodeURIComponent(name)}`;
+                const fig = document.createElement('figure');
+                fig.className = 'native-yolo-card';
+                const caption = document.createElement('figcaption');
+                caption.innerHTML = `${escapeHtml(title)}<span>${escapeHtml(name)}</span>`;
+                fig.appendChild(caption);
+                const link = document.createElement('a');
+                link.href = src;
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                const img = document.createElement('img');
+                img.src = src;
+                img.alt = title;
+                img.loading = 'lazy';
+                // ponytail: addEventListener 替代内联 onerror，与 showTrainResultsImage 一致，避免内联 JS / CSP 风险
+                img.addEventListener('error', () => {
+                    img.closest('.native-yolo-card')?.classList.add('image-missing');
+                });
+                link.appendChild(img);
+                fig.appendChild(link);
+                grid.appendChild(fig);
+            });
+            setTrainArtifactBody('');
+            const body = document.getElementById('trainArtifactBody');
+            if (body) body.appendChild(grid);
         });
 }
 

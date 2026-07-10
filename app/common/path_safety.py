@@ -33,6 +33,11 @@ def resolve_child_path(base_dir, name, *, extensions=None):
     """
     if not name or not isinstance(name, str):
         raise PathSafetyError('名称不能为空')
+    # ponytail: reject Windows ADS (foo.png:$DATA) / device names / control chars
+    # before any join. secure_save_path runs secure_filename first so its input is
+    # already scrubbed, but resolve_child_path is called with raw lookups too.
+    if ':' in name or any(ord(c) < 32 for c in name):
+        raise PathSafetyError('非法文件名')
     if os.path.isabs(name):
         # An absolute user-supplied name discards base_dir in os.path.join.
         raise PathSafetyError(f'非法路径: {name}')
@@ -47,8 +52,10 @@ def resolve_child_path(base_dir, name, *, extensions=None):
     if common != base_nc:
         raise PathSafetyError(f'路径越界: {name}')
     if extensions:
-        low = child.lower()
-        if not any(low.endswith(ext.lower()) for ext in extensions):
+        # ponytail: splitext beats endswith on the whole path - 'a.png:.jpg'
+        # must NOT pass a ['.png','.jpg'] check (Windows ADS bypass).
+        ext = os.path.splitext(child)[1].lower()
+        if ext not in {e.lower() for e in extensions}:
             raise PathSafetyError('不支持的文件类型')
     return child
 

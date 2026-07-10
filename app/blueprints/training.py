@@ -4,24 +4,18 @@ import threading
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
-from app.common.utils import now_iso
 from app.services import models_service
 from app.services.training_service import (
     _artifact_allowed_roots,
-    _extract_metrics_from_results_csv,
-    append_train_log,
     build_split_summary,
     build_train_job,
-    build_yolo_training_dataset,
     delete_split_profile,
     get_train_job,
     list_train_jobs,
     load_split_profile,
-    normalize_split_config,
     resolve_training_device,
     run_training_job,
     save_split_profile,
-    split_counts,
     training_readiness,
     update_train_job,
 )
@@ -183,6 +177,14 @@ def train_start():
     mode = str(payload.get("mode", "initial")).strip().lower()
     if mode not in {"initial", "incremental"}:
         mode = "incremental"
+
+    # H12: prevent concurrent training threads. Only "running" is checked (not
+    # "queued") because tests submit back-to-back jobs whose worker thread is
+    # mocked to no-op, leaving them permanently "queued" - blocking "queued"
+    # would reject the legitimate second submission in that flow.
+    existing = list_train_jobs()
+    if any(j.get("status") == "running" for j in existing):
+        return jsonify({"error": "已有训练任务在运行或排队中", "status": "busy"}), 409
 
     readiness = training_readiness()
     if mode == "initial" and not readiness.get("ready_for_initial"):

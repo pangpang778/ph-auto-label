@@ -1,12 +1,25 @@
-"""Model-registry + active-model JSON stores + lock + model-path resolution."""
+"""Model-registry + active-model JSON stores + lock + model-path resolution.
+
+The model registry is guarded by a cross-process ``filelock``
+(``model_registry.json.lock``) instead of a process-local ``threading.Lock``
+so concurrent worker processes can no longer clobber each other's
+read-modify-write cycles. :func:`update_model_registry` is the atomic RMW
+entry; :func:`append_model_registry_record` is rewritten on top of it.
+"""
 import os
-import threading
+
+import filelock
 
 from app.common.config import PATHS
 from app.common.json_store import read_json_file, write_json_file
 from app.common.utils import now_iso
 
-MODEL_REGISTRY_LOCK = threading.Lock()
+_MODEL_REGISTRY_LOCK_PATH = PATHS['model_registry'] + '.lock'
+
+# Kept as a process-local filelock alias for any caller that still imports the
+# name. Prefer update_model_registry() for RMW; this instance is acquired
+# non-reentrantly by the read/write helpers below.
+MODEL_REGISTRY_LOCK = filelock.FileLock(_MODEL_REGISTRY_LOCK_PATH, timeout=10)
 
 
 def get_models_install_path() -> str:
@@ -23,20 +36,38 @@ def get_models_dir() -> str:
 
 
 def read_model_registry() -> list[dict]:
-    with MODEL_REGISTRY_LOCK:
+    with filelock.FileLock(_MODEL_REGISTRY_LOCK_PATH, timeout=10):
         return read_json_file(PATHS['model_registry'], [])
 
 
 def write_model_registry(models: list[dict]) -> None:
-    with MODEL_REGISTRY_LOCK:
+    """Overwrite model_registry.json under the cross-process lock."""
+    with filelock.FileLock(_MODEL_REGISTRY_LOCK_PATH, timeout=10):
         write_json_file(PATHS['model_registry'], models)
+
+
+def update_model_registry(mutator, *, timeout=10):
+    """Atomically read-modify-write model_registry.json under the file lock.
+
+    ``mutator(current: list) -> (new_data, result)`` where ``new_data`` is the
+    list to persist (or ``None`` to skip the write) and ``result`` is any
+    value returned to the caller.
+    """
+    lock = filelock.FileLock(_MODEL_REGISTRY_LOCK_PATH, timeout=timeout)
+    with lock:
+        current = read_json_file(PATHS['model_registry'], [])
+        new_data, result = mutator(current)
+        if new_data is not None:
+            write_json_file(PATHS['model_registry'], new_data)
+        return result
 
 
 def append_model_registry_record(model_record: dict) -> None:
-    with MODEL_REGISTRY_LOCK:
-        models = read_json_file(PATHS['model_registry'], [])
+    """Append a single record atomically via :func:`update_model_registry`."""
+    def _mutator(models):
         models.append(model_record)
-        write_json_file(PATHS['model_registry'], models)
+        return models, None
+    update_model_registry(_mutator)
 
 
 def get_active_model() -> dict:

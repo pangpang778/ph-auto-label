@@ -113,7 +113,7 @@ function showAiStatusBar() {
         }
     }
 
-    statusInfo.innerHTML = `<i class="fas fa-robot"></i> ${aiAnnotateEngine} / ${aiAnnotateModel} | 阈值:${aiAnnotateConfidence}`;
+    statusInfo.innerHTML = `<i class="fas fa-robot"></i> ${aiAnnotateEngine} / ${escapeHtml(aiAnnotateModel)} | 阈值:${aiAnnotateConfidence}`;
     statusInfo.style.display = 'inline-flex';
 }
 
@@ -171,7 +171,7 @@ function performAiAnnotate() {
             // 将AI标注结果添加到当前标注
             data.annotations.forEach(ann => {
                 // 生成唯一ID
-                ann.id = Date.now() + Math.floor(Math.random() * 1000);
+                ann.id = Date.now() + Math.floor(Math.random() * 1000000000);
                 currentAnnotations.push(ann);
             });
 

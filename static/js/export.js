@@ -12,10 +12,12 @@ function showExportModal() {
     classes.forEach(cls => {
         const label = document.createElement('label');
         label.className = 'class-checkbox-label';
+        const safeColor = /^#[0-9a-fA-F]{6}$/.test(cls.color) ? cls.color : '#ff0000';
+        const safeName = escapeHtml(cls.name);
         label.innerHTML = `
-            <input type="checkbox" name="exportClasses" value="${cls.name}" checked>
-            <span class="class-color-inline" style="background-color: ${cls.color};"></span>
-            ${cls.name}
+            <input type="checkbox" name="exportClasses" value="${safeName}" checked>
+            <span class="class-color-inline" style="background-color: ${safeColor};"></span>
+            ${safeName}
         `;
         container.appendChild(label);
     });
