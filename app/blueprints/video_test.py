@@ -2,12 +2,13 @@
 import json
 import os
 
-from flask import Blueprint, Response, jsonify, request, send_from_directory
+from flask import Blueprint, Response, jsonify, render_template, request, send_from_directory
+from werkzeug.utils import secure_filename
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
-from app.services.video_test_service import _parse_classes, parse_video_test_params
+from app.services.video_test_service import _parse_classes, get_active_model, get_models_dir, parse_video_test_params
 from plugins.sam3_service import sam3_service
-from plugins.video_inference import list_available_videos, resolve_video_path, video_inference_service
+from plugins.video_inference import UPLOAD_VIDEO_DIR, list_available_videos, resolve_video_path, video_inference_service
 
 bp = Blueprint("video_test", __name__)
 
@@ -47,10 +48,10 @@ def video_test_upload():
         return jsonify({'error': f'不支持的视频格式: {ext}'}), 400
     name = safe
     i = 1
-    while os.path.exists(os.path.join(VC_UPLOAD_DIR, name)):
+    while os.path.exists(os.path.join(UPLOAD_VIDEO_DIR, name)):
         name = f"{base}_{i}{ext}"
         i += 1
-    f.save(os.path.join(VC_UPLOAD_DIR, name))
+    f.save(os.path.join(UPLOAD_VIDEO_DIR, name))
     return jsonify({'message': '上传成功', 'name': name, 'url': f'/api/video-test/video/{name}'})
 
 

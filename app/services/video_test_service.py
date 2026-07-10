@@ -4,6 +4,8 @@ Thin helper for the video-test blueprint; the route handlers delegate inference
 to plugins.video_inference directly.
 """
 
+from app.repositories.model_registry_repo import get_active_model, get_models_dir  # noqa: F401  (re-exported for blueprint)
+
 
 def _parse_classes(raw) -> list:
     """把 SAM3 目标类别从 list/str 解析成干净的字符串列表。"""

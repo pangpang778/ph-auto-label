@@ -56,5 +56,3 @@ function loadShortcutSettings() {
         }
     }
 }
-
-// 防抖函数

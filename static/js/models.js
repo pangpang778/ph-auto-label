@@ -12,36 +12,32 @@ function checkYolo11InstallStatus() {
             
             // 更新安装信息显示
             const installInfoElement = document.getElementById('yolo11InstallInfo');
+            if (!installInfoElement) {
+                // ponytail: install info container absent (e.g. modal not open) - nothing to render
+                return;
+            }
             if (isInstalled) {
                 // 显示详细安装信息
                 const installTime = data.install_time || '未知';
                 const hardware = data.has_cuda ? 'CUDA (GPU)' : 'CPU';
                 installInfoElement.innerHTML = `
-                    <p style="margin: 5px 0;"><strong>安装时间:</strong> ${installTime}</p>
-                    <p style="margin: 5px 0;"><strong>硬件支持:</strong> ${hardware}</p>
+                    <p style="margin: 5px 0;"><strong>安装时间:</strong> ${escapeHtml(installTime)}</p>
+                    <p style="margin: 5px 0;"><strong>硬件支持:</strong> ${escapeHtml(hardware)}</p>
                 `;
                 installInfoElement.style.display = 'block';
-                
-                // 更新按钮状态
-                if (modelsSection) {
-                    modelsSection.style.opacity = '1';
-                    modelsSection.style.pointerEvents = 'auto';
-                }
-                if (downloadModelsBtn) downloadModelsBtn.disabled = false;
-                if (refreshModelsBtn) refreshModelsBtn.disabled = false;
             } else {
                 // 隐藏安装信息
                 installInfoElement.innerHTML = '';
                 installInfoElement.style.display = 'none';
-                
-                // 更新按钮状态
-                if (modelsSection) {
-                    modelsSection.style.opacity = '0.5';
-                    modelsSection.style.pointerEvents = 'none';
-                }
-                if (downloadModelsBtn) downloadModelsBtn.disabled = true;
-                if (refreshModelsBtn) refreshModelsBtn.disabled = true;
             }
+
+            // 更新按钮/区域状态（各元素均可能缺失，逐个 guard）
+            if (modelsSection) {
+                modelsSection.style.opacity = isInstalled ? '1' : '0.5';
+                modelsSection.style.pointerEvents = isInstalled ? 'auto' : 'none';
+            }
+            if (downloadModelsBtn) downloadModelsBtn.disabled = !isInstalled;
+            if (refreshModelsBtn) refreshModelsBtn.disabled = !isInstalled;
         })
         .catch(error => {
             console.error('检查YOLO11安装状态失败:', error);
@@ -148,13 +144,16 @@ function refreshModels() {
                 data.models.forEach(model => {
                     const modelItem = document.createElement('div');
                     modelItem.className = 'model-item';
+                    // ponytail: model name is filename/backend-derived -> escape display, wire delete via data attr (no inline onclick -> no XSS)
                     modelItem.innerHTML = `
                         <i class="fas fa-file-code"></i>
-                        <span class="model-name">${model}</span>
-                        <button class="delete-model-btn" onclick="deleteModel('${model}')">
+                        <span class="model-name">${escapeHtml(model)}</span>
+                        <button class="delete-model-btn" data-model="${escapeHtml(model)}">
                             <i class="fas fa-times"></i>
                         </button>
                     `;
+                    const deleteBtn = modelItem.querySelector('.delete-model-btn');
+                    deleteBtn.addEventListener('click', () => deleteModel(deleteBtn.dataset.model));
                     modelsList.appendChild(modelItem);
                 });
             } else {

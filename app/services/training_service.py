@@ -153,7 +153,9 @@ def assign_training_splits(candidates: list[str], split_config: dict | None = No
         n_val = max(1, int(n * 0.15))
         train_set = annotated[:n_train]
         val_set = annotated[n_train:n_train + n_val]
-        test_set = annotated[n_train + n_val:] or annotated[:1]
+        # ponytail: too few candidates -> empty test set rather than reusing a
+        # train image (silent train/test leak). n=20 still yields test=1.
+        test_set = annotated[n_train + n_val:]
         return {"train": train_set, "val": val_set, "test": test_set}
 
     config = normalize_split_config(split_config)
@@ -173,11 +175,13 @@ def assign_training_splits(candidates: list[str], split_config: dict | None = No
     n_val = max(1, int(n * config["val_ratio"]))
     if n_train + n_val >= n:
         n_val = max(1, n - n_train - 1) if n > 2 else max(0, n - n_train)
-    return {
-        "train": shuffled[:n_train],
-        "val": shuffled[n_train:n_train + n_val],
-        "test": shuffled[n_train + n_val:] or shuffled[:1],
-    }
+    train_set = shuffled[:n_train]
+    val_set = shuffled[n_train:n_train + n_val]
+    # ponytail: contiguous slices are structurally disjoint; the old
+    # `or shuffled[:1]` fallback reused a train image when too few candidates
+    # -> silent train/test leak. Empty test set is the correct outcome.
+    test_set = shuffled[n_train + n_val:]
+    return {"train": train_set, "val": val_set, "test": test_set}
 
 
 
@@ -383,3 +387,65 @@ def resolve_training_device(requested_device):
 
 def _artifact_allowed_roots() -> list[str]:
     return [PATHS['train_work'], models_service.get_models_dir()]
+
+
+
+# ---------------------------------------------------------------------------
+# Service-layer wrappers for the training blueprint.
+#
+# The blueprint must not reach past this layer into train_jobs_repo /
+# training_splits_repo / read_json_file directly (layering contract). These
+# thin delegators preserve the exact behavior and response shapes the route
+# handlers and characterization tests depend on.
+# ---------------------------------------------------------------------------
+
+def list_train_jobs() -> list[dict]:
+    """All train-job records (unsorted; callers sort as needed)."""
+    return read_train_jobs()
+
+
+def get_train_job(job_id: str) -> dict | None:
+    """Return the job with ``id == job_id`` or ``None``."""
+    return next((x for x in read_train_jobs() if x.get("id") == job_id), None)
+
+
+def update_train_job(job: dict) -> None:
+    """Upsert a single train-job record."""
+    upsert_train_job(job)
+
+
+def delete_split_profile(profile_id: str = "default") -> None:
+    """Remove a persisted split profile. No-op if the profile is absent."""
+    with TRAINING_SPLITS_LOCK:
+        profiles = read_json_file(PATHS['training_splits'], {})
+        profiles.pop(profile_id, None)
+        write_json_file(PATHS['training_splits'], profiles)
+
+
+
+def recover_orphaned_jobs() -> int:
+    """Mark jobs left in ``status == 'running'`` as ``failed`` on startup.
+
+    A crash mid-training leaves a job stuck in ``running`` forever. Called once
+    at app startup (wired by the factory). Idempotent: only ``running`` jobs are
+    touched - ``queued``/``completed``/``failed`` are left alone. Returns the
+    number of jobs recovered. Never raises on a missing/empty store.
+    """
+    try:
+        jobs = read_train_jobs()
+    except Exception:
+        return 0
+    if not jobs:
+        return 0
+    recovered = 0
+    changed = False
+    for job in jobs:
+        if job.get("status") == "running":
+            job["status"] = "failed"
+            job["message"] = "进程重启时中断"
+            job["updated_at"] = now_iso()
+            recovered += 1
+            changed = True
+    if changed:
+        write_train_jobs(jobs)
+    return recovered

@@ -133,6 +133,8 @@ function performAiAnnotate() {
 
     aiAnnotating = true;
     showToast('正在进行AI标注...');
+    // ponytail: capture image identity at fetch start; discard results if user switched images before response lands
+    const targetImage = currentImage;
 
     const installPath = document.getElementById('yolo11InstallPath')?.value || 'plugins/yolo11';
     const worldClasses = aiAnnotateEngine === 'sam3' ? getWorldClassesInput() : [];
@@ -144,7 +146,7 @@ function performAiAnnotate() {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            image_name: currentImage,
+            image_name: targetImage,
             model_name: aiAnnotateModel,
             confidence: aiAnnotateConfidence,
             install_path: installPath,
@@ -154,10 +156,14 @@ function performAiAnnotate() {
     })
     .then(response => response.json())
     .then(data => {
-        aiAnnotating = false;
-
         if (data.error) {
             showToast(`AI标注失败: ${data.error}`);
+            return;
+        }
+
+        // 结果到达时用户已切到别的图 -> 丢弃，避免把A的结果写到C的标注数组
+        if (currentImage !== targetImage) {
+            showToast('AI标注结果已过期（已切换图片）', 'warning');
             return;
         }
 
@@ -183,8 +189,11 @@ function performAiAnnotate() {
         }
     })
     .catch(error => {
-        aiAnnotating = false;
         console.error('AI标注失败:', error);
-        showToast('AI标注失败: ' + error.message);
+        showToast('AI标注失败: ' + error.message, 'error');
+    })
+    .finally(() => {
+        // ponytail: 无论成功/失败都释放守卫，避免一次失败永久阻塞后续标注
+        aiAnnotating = false;
     });
 }

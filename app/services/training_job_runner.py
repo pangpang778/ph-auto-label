@@ -236,7 +236,9 @@ def _mark_completed(job: dict, model_info: dict) -> None:
 
 def _mark_failed(job: dict, exc: BaseException) -> None:
     job["status"] = "failed"
-    job["progress"] = 100
+    # ponytail: 100 is reserved for completed; a failed job keeps its last
+    # known progress (capped at 99) so status is the authoritative signal.
+    job["progress"] = min(int(job.get("progress", 0) or 0), 99)
     job["message"] = f"Training failed: {str(exc)}"
     job["error"] = traceback.format_exc()
     job["updated_at"] = now_iso()

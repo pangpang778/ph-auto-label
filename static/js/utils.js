@@ -36,8 +36,18 @@ function unhighlight(e) {
 }
 
 // 处理文件拖放
-function showToast(message) {
+function showToast(message, level) {
     const toast = document.getElementById('toast');
+    if (!toast) return; // ponytail: toast 元素未渲染时静默跳过，避免 null 报错
+
+    // ponytail: level 可为 'error'|'warning'|'info'，缺省按 info 处理（保持单参数调用兼容）
+    const validLevels = ['error', 'warning', 'info'];
+    const severity = validLevels.includes(level) ? level : 'info';
+
+    // 清理旧的级别 class，再挂上当前级别
+    validLevels.forEach(l => toast.classList.remove(`toast-${l}`));
+    toast.classList.add(`toast-${severity}`);
+
     toast.textContent = message;
     toast.style.display = 'block';
     toast.classList.add('show');

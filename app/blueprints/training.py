@@ -1,16 +1,10 @@
 """Training blueprint: /api/train/* routes."""
-import json
 import os
 import threading
-import uuid
 
-from flask import Blueprint, current_app, jsonify, request, send_file, send_from_directory
+from flask import Blueprint, current_app, jsonify, request, send_file
 
-from app.common.config import PATHS
-from app.common.json_store import read_json_file, write_json_file
-from app.common.utils import color_for_index, now_iso
-from app.repositories.train_jobs_repo import read_train_jobs, upsert_train_job, write_train_jobs
-from app.repositories.training_splits_repo import TRAINING_SPLITS_LOCK
+from app.common.utils import now_iso
 from app.services import models_service
 from app.services.training_service import (
     _artifact_allowed_roots,
@@ -19,6 +13,9 @@ from app.services.training_service import (
     build_split_summary,
     build_train_job,
     build_yolo_training_dataset,
+    delete_split_profile,
+    get_train_job,
+    list_train_jobs,
     load_split_profile,
     normalize_split_config,
     resolve_training_device,
@@ -26,6 +23,7 @@ from app.services.training_service import (
     save_split_profile,
     split_counts,
     training_readiness,
+    update_train_job,
 )
 from training_artifacts import (
     ARTIFACT_CONTENT_TYPES,
@@ -64,31 +62,27 @@ def train_split_save():
 def train_split_reset():
     payload = request.json or {}
     profile_id = str(payload.get("profile_id") or "default")
-    with TRAINING_SPLITS_LOCK:
-        profiles = read_json_file(PATHS['training_splits'], {})
-        profiles.pop(profile_id, None)
-        write_json_file(PATHS['training_splits'], profiles)
+    delete_split_profile(profile_id)
     return jsonify(build_split_summary({"profile_id": profile_id}))
 
 
 @bp.route('/api/train/jobs')
 def train_jobs():
-    jobs = read_train_jobs()
+    jobs = list_train_jobs()
     jobs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return jsonify({"jobs": jobs})
 
 
 @bp.route('/api/train/jobs/<job_id>')
 def train_job_detail(job_id):
-    jobs = read_train_jobs()
-    job = next((x for x in jobs if x.get("id") == job_id), None)
+    job = get_train_job(job_id)
     if not job:
         return jsonify({"error": "job not found"}), 404
     return jsonify(job)
 
 
 def _get_train_job_or_404(job_id: str):
-    job = next((x for x in read_train_jobs() if x.get("id") == job_id), None)
+    job = get_train_job(job_id)
     if not job:
         return None, (jsonify({"error": "job not found"}), 404)
     return job, None
@@ -200,7 +194,7 @@ def train_start():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    upsert_train_job(job)
+    update_train_job(job)
     t = threading.Thread(target=run_training_job, args=(job["id"], current_app.root_path), daemon=True)
     t.start()
     return jsonify({"message": "training started", "job": job})

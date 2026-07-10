@@ -1,6 +1,8 @@
 """Video-timeline domain service: SOP scenario parsing + timeline segment normalization."""
 import os
 
+from app.repositories.timeline_repo import read_scenario, read_timelines, write_scenario, write_timelines  # noqa: F401  (re-exported for blueprint)
+
 
 def normalize_timeline_segment(raw, video_name=''):
     segment = dict(raw or {})
