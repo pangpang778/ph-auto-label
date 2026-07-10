@@ -12,6 +12,7 @@ import traceback
 from flask import Blueprint, jsonify, render_template, request, send_from_directory
 
 from app.common.config import PATHS
+from app.common.path_safety import PathSafetyError, secure_save_path
 from app.services import (
     annotation_export_service,
     annotation_import_service,
@@ -36,6 +37,8 @@ _ANNOTATION_METRIC_HEADERS = (
     ('write_verify_replace_ms', 'X-Annotations-Write-Ms'),
     ('total_ms', 'X-Annotations-Total-Ms'),
 )
+
+_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
 
 
 def _annotation_error_response(exc):
@@ -65,6 +68,8 @@ def get_classes():
 def save_classes():
     """保存所有类别"""
     data = request.json
+    if not isinstance(data, list):
+        return jsonify({'error': 'classes 必须是列表'}), 400
     with open(PATHS['classes'], 'w') as f:
         json.dump(data, f, indent=2)
     return jsonify({'message': 'Classes saved successfully'})
@@ -100,10 +105,22 @@ def upload_folder():
     files = request.files.getlist('files[]')
     uploaded_files = []
     for file in files:
-        if file.filename != '':
-            filepath = os.path.join(PATHS['uploads'], file.filename or '')
-            file.save(filepath)
-            uploaded_files.append(file.filename or '')
+        if file.filename == '':
+            continue
+        try:
+            save_path = secure_save_path(
+                PATHS['uploads'], file.filename, extensions=_IMAGE_EXTENSIONS,
+            )
+        except PathSafetyError as e:
+            return jsonify({'error': f'非法文件: {file.filename} ({str(e)})'}), 400
+        if os.path.exists(save_path):
+            base, ext = os.path.splitext(save_path)
+            i = 1
+            while os.path.exists(f"{base}_{i}{ext}"):
+                i += 1
+            save_path = f"{base}_{i}{ext}"
+        file.save(save_path)
+        uploaded_files.append(os.path.basename(save_path))
     return jsonify({'message': 'Files uploaded successfully', 'files': uploaded_files})
 
 
@@ -129,10 +146,14 @@ def upload_video():
         return jsonify({'error': 'No video file selected'}), 400
     try:
         frame_interval = int(request.form.get('frame_interval', 30))
+        if frame_interval < 1:
+            return jsonify({'error': 'frame_interval 必须 >= 1'}), 400
         frames = annotation_video_service.extract_video_frames(
             video_file.read(), video_file.filename or 'video', frame_interval,
         )
         return jsonify({'message': 'Video frames extracted successfully', 'frames': frames, 'count': len(frames)})
+    except ValueError:
+        return jsonify({'error': 'frame_interval 必须是整数'}), 400
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': f'Failed to process video: {str(e)}'}), 500

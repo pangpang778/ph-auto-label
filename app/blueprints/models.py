@@ -11,14 +11,19 @@ from app.common.json_store import read_json_file, write_json_file
 from app.common.utils import color_for_index, now_iso
 from app.services.models_service import (
     append_record,
+    delete_model_file,
     get_active_model,
     get_models_dir,
     get_models_install_path,
     next_model_version,
     read_model_registry,
+    resolve_install_path,
+    save_uploaded_models,
     set_active,
+    stream_model_download,
     write_model_registry,
 )
+from app.common.path_safety import PathSafetyError
 
 bp = Blueprint("models", __name__)
 
@@ -56,11 +61,22 @@ def check_yolo11_install():
 
 @bp.route('/api/download-models')
 def download_models():
-    """Download YOLO models with SSE progress updates."""
+    """Download YOLO models with SSE progress updates.
+
+    NOTE: intentionally left as GET. The frontend (static/js/models.js) opens
+    this stream via ``EventSource``, which only supports GET requests; making
+    it POST would break the SSE download flow. The model name is validated
+    server-side (``[A-Za-z0-9._-]+``) before reaching the child process, so
+    the GET surface carries no injection risk (C1 fix applied in
+    ``stream_model_download``).
+    """
     models_str = request.args.get('models', '')
     models = [m.strip() for m in models_str.split(',') if m.strip()]
-    install_path = models_service.resolve_install_path(request.args.get('install_path', 'plugins/yolo11'))
-    return Response(models_service.stream_model_download(models, install_path), mimetype='text/event-stream')
+    try:
+        install_path = resolve_install_path(request.args.get('install_path', 'plugins/yolo11'))
+    except PathSafetyError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    return Response(stream_model_download(models, install_path), mimetype='text/event-stream')
 
 
 @bp.route('/api/list-models')
@@ -93,24 +109,36 @@ def list_models():
 @bp.route('/api/upload-model', methods=['POST'])
 def upload_model():
     """上传YOLO11模型文件"""
-    install_path = models_service.resolve_install_path(request.headers.get('X-Install-Path', 'plugins/yolo11'))
+    try:
+        install_path = resolve_install_path(request.headers.get('X-Install-Path', 'plugins/yolo11'))
+    except PathSafetyError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     if not os.path.exists(install_path) or not os.path.isdir(install_path):
         return jsonify({'success': False, 'error': 'YOLO11未安装'})
     if 'files[]' not in request.files:
         return jsonify({'success': False, 'error': '未找到上传的文件'})
     files = [(f.filename or '', f.read()) for f in request.files.getlist('files[]')]
-    uploaded = models_service.save_uploaded_models(install_path, files)
+    try:
+        uploaded = save_uploaded_models(install_path, files)
+    except PathSafetyError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     return jsonify({'success': True, 'uploaded_files': uploaded})
 
 
 @bp.route('/api/delete-model', methods=['POST'])
 def delete_model():
     """删除YOLO11模型文件"""
-    install_path = models_service.resolve_install_path(request.headers.get('X-Install-Path', 'plugins/yolo11'))
+    try:
+        install_path = resolve_install_path(request.headers.get('X-Install-Path', 'plugins/yolo11'))
+    except PathSafetyError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     if not os.path.exists(install_path) or not os.path.isdir(install_path):
         return jsonify({'success': False, 'error': 'YOLO11未安装'})
     data = request.json or {}
-    success, message = models_service.delete_model_file(install_path, data.get('model_name', ''))
+    try:
+        success, message = delete_model_file(install_path, data.get('model_name', ''))
+    except PathSafetyError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     if success:
         return jsonify({'success': True, 'message': message})
     return jsonify({'success': False, 'error': message})

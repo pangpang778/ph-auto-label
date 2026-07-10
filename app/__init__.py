@@ -5,19 +5,22 @@ Exposes ``create_app()`` (application factory) and a legacy re-export shim so
 test suite. Route handlers live in ``app/blueprints/*``; business logic in
 ``app/services/*``; JSON I/O in ``app/repositories/*``; shared helpers in
 ``app/common/*``.
+
+The package NO LONGER constructs a module-level Flask app instance - the
+factory runs only when ``create_app()`` is explicitly called (by ``run.py`` or
+the ``isolated_app`` test fixture). This prevents filesystem writes
+(``_ensure_dirs``/``_init_data_files``) from firing as a side effect of
+``import app`` and avoids creating two app instances.
 """
 import json
+import logging
 import os
 
 from flask import Flask
 from flask_cors import CORS
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
-from app.repositories.model_registry_repo import (
-    get_active_model,
-    get_models_dir,
-    get_models_install_path,
-)
+from app.services import models_service
 from app.services.training_service import (
     _artifact_allowed_roots,
     build_yolo_training_dataset,
@@ -28,12 +31,34 @@ from plugins.sam3_service import sam3_service
 from plugins.video_inference import video_inference_service
 
 __all__ = [
-    "create_app", "app", "PATHS", "VIDEO_EXTENSIONS",
+    "create_app", "PATHS", "VIDEO_EXTENSIONS",
     "video_inference_service", "sam3_service",
     "normalize_split_config", "build_yolo_training_dataset", "run_training_job",
     "get_active_model", "get_models_dir", "get_models_install_path",
-    "_artifact_allowed_roots",
 ]
+
+
+# --- Backward-compat re-exports -------------------------------------------
+# These names historically lived on the top-level ``app`` package. Callers
+# (e.g. tests via ``training_app.get_models_dir()``) still import them from
+# here, so they are preserved - but they now DELEGATE to the service layer
+# instead of importing straight from ``app.repositories.model_registry_repo``,
+# honoring the closed-world contract documented in
+# ``app/services/models_service.py`` (cross-domain callers must go through the
+# service, never the repo directly).
+def get_active_model():
+    """Delegate to :func:`app.services.models_service.get_active_model`."""
+    return models_service.get_active_model()
+
+
+def get_models_dir():
+    """Delegate to :func:`app.services.models_service.get_models_dir`."""
+    return models_service.get_models_dir()
+
+
+def get_models_install_path():
+    """Delegate to :func:`app.services.models_service.get_models_install_path`."""
+    return models_service.get_models_install_path()
 
 # app/__init__.py -> app -> repo root (templates/static live at repo root).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,7 +103,22 @@ def create_app():
         template_folder=os.path.join(_REPO_ROOT, "templates"),
         static_folder=os.path.join(_REPO_ROOT, "static"),
     )
-    CORS(app)
+
+    # --- Security config -------------------------------------------------
+    # SECRET_KEY must always be set, even though sessions are not currently
+    # used, so a future session/flash dependency cannot silently fall back to
+    # a static default. Per-start random is acceptable here; production should
+    # supply SECRET_KEY via the environment.
+    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or os.urandom(32)
+
+    # CORS origins are configurable via ALLOWED_ORIGINS (comma-separated).
+    # Default "*" preserves local-dev behavior; PRODUCTION MUST override this.
+    allowed = os.environ.get("ALLOWED_ORIGINS")
+    cors_origins = (
+        [o.strip() for o in allowed.split(",") if o.strip()]
+        if allowed else "*"
+    )
+    CORS(app, origins=cors_origins)
 
     # Deferred imports avoid any module-load cycles.
     from app.blueprints.annotation import bp as annotation_bp
@@ -96,9 +136,16 @@ def create_app():
 
     _ensure_dirs()
     _init_data_files()
+
+    # Defensive orphan-job recovery: any training job left "running" by a
+    # previous crash is reset so it no longer blocks the UI. Wrapped so a
+    # failure here can never break app startup.
+    try:
+        from app.services.training_service import recover_orphaned_jobs
+        recover_orphaned_jobs()
+    except Exception as exc:  # never let cleanup break app startup
+        logging.getLogger(__name__).warning(
+            "orphan recovery skipped: %s", exc
+        )
+
     return app
-
-
-# Module-level app instance so `import app as training_app` + `training_app.app`
-# resolve (legacy shim for the test suite).
-app = create_app()

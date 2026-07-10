@@ -9,18 +9,33 @@ Fixes two latent bugs from the monolith: ``sys.executable`` and
 routes always raised ``NameError`` -> 500. They are now imported properly.
 No characterization test covered these routes (they could not run), so the
 fix is non-breaking; the success response shapes match the original design.
+
+Security/correctness hardening:
+* Paths (model / image) are passed to the child process via ENVIRONMENT
+  VARIABLES, never f-string-interpolated into the ``python -c`` script -
+  a ``"`` in a path could previously break out of the ``r"..."`` literal
+  and achieve RCE (C1).
+* Image/model lookups use :func:`resolve_child_path` so ``..`` / absolute
+  paths cannot escape their base directory (H4).
+* The batch read-modify-write now happens atomically under
+  :func:`update_annotations` (C2).
+* Re-running YOLO batch no longer double-appends detections: existing
+  AUTO annotations for an image are replaced while manual ones are
+  preserved, making the batch path idempotent (MEDIUM).
 """
+import filelock
 import json
 import os
 import subprocess
 import sys
 
 from app.common.config import PATHS
+from app.common.path_safety import PathSafetyError, resolve_child_path
+from app.repositories.annotation_repo import update_annotations
 from app.services import models_service
 from app.services.annotation_service import (
     AnnotationError,
     assign_class_colors_and_ids,
-    read_annotations,
     read_classes,
     write_annotations,
     write_classes,
@@ -29,6 +44,14 @@ from app.services.training_service import resolve_training_device
 
 _JSON_START = "###JSON_START###"
 _JSON_END = "###JSON_END###"
+
+# Environment variables consumed by the child-process inference scripts.
+# Paths are never interpolated into the ``python -c`` source (C1).
+_ENV_MODEL_PATH = 'PH_MODEL_PATH'
+_ENV_IMAGE_PATH = 'PH_IMAGE_PATH'        # single-image path
+_ENV_IMAGE_PATHS_JSON = 'PH_IMAGE_PATHS_JSON'  # batch: json.dumps(list[str])
+
+_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
 
 
 def run_yolo_single(data):
@@ -50,8 +73,12 @@ def run_yolo_single(data):
     model_path = _validate_model_path(model_name, install_path)
     python_path = _resolve_python_path(install_path)
 
-    script = _build_single_script(model_path, image_path, confidence, device_literal)
-    output = _run_inference(python_path, script, install_path, timeout=60)
+    script = _build_single_script(confidence, device_literal)
+    env = _build_env({
+        _ENV_MODEL_PATH: model_path,
+        _ENV_IMAGE_PATH: image_path,
+    })
+    output = _run_inference(python_path, script, install_path, env, timeout=60)
     annotations = _extract_json(output, include_output_fallback=True)
 
     existing_classes = read_classes()
@@ -80,27 +107,52 @@ def run_yolo_batch(data):
     if not image_paths:
         raise AnnotationError(400, '没有有效的图片')
 
-    script = _build_batch_script(model_path, json.dumps(image_paths), confidence, device_literal)
-    output = _run_inference(python_path, script, install_path, timeout=300)
+    script = _build_batch_script(confidence, device_literal)
+    env = _build_env({
+        _ENV_MODEL_PATH: model_path,
+        _ENV_IMAGE_PATHS_JSON: json.dumps(image_paths),
+    })
+    output = _run_inference(python_path, script, install_path, env, timeout=300)
     all_annotations = _extract_json(output, include_output_fallback=False)
 
     return _merge_batch_results(all_annotations, image_paths, valid_image_names)
 
 
 def _merge_batch_results(all_annotations, image_paths, valid_image_names):
-    """Assign colors/ids, merge into persisted annotations, build summary."""
+    """Assign colors/ids, merge into persisted annotations, build summary.
+
+    The read-modify-write of ``annotations.json`` happens atomically under
+    one ``update_annotations`` lock acquisition (C2). Existing AUTO
+    annotations for an image are replaced (preserving manual ones) so a
+    re-run does not double-append detections (MEDIUM).
+    """
     existing_classes = read_classes()
-    all_saved_annotations = read_annotations()
     new_classes_added = False
-    results_summary = []
+
+    # Pre-compute per-image results outside the annotation lock so the
+    # critical section only touches annotations.json (classes have their
+    # own store). assign_class_colors_and_ids mutates existing_classes.
+    per_image = []
     for i, img_path in enumerate(image_paths):
         img_name = valid_image_names[i]
         annotations = all_annotations.get(img_path, [])
         new_classes_added = assign_class_colors_and_ids(annotations, existing_classes) or new_classes_added
-        existing_anns = all_saved_annotations.get(img_name, [])
-        all_saved_annotations[img_name] = existing_anns + annotations
-        results_summary.append({'image_name': img_name, 'count': len(annotations), 'success': True})
-    write_annotations(all_saved_annotations)
+        per_image.append((img_name, annotations))
+
+    def _mutate(current):
+        results_summary = []
+        for img_name, annotations in per_image:
+            existing_anns = current.get(img_name, [])
+            # Preserve manual annotations; replace prior AUTO detections.
+            current[img_name] = [a for a in existing_anns if not a.get('auto')] + annotations
+            results_summary.append({'image_name': img_name, 'count': len(annotations), 'success': True})
+        return current, results_summary
+
+    try:
+        results_summary = update_annotations(_mutate, timeout=10)
+    except filelock.Timeout:
+        raise AnnotationError(503, '文件正在被其他操作使用，请稍后重试')
+
     if new_classes_added:
         write_classes(existing_classes)
     return {
@@ -129,16 +181,23 @@ def _resolve_install_path(install_path):
 
 
 def _validate_image_path(image_name):
-    """Absolute image path; raises AnnotationError(400) if missing."""
-    image_path = os.path.abspath(os.path.join(PATHS['uploads'], image_name))
+    """Absolute image path under uploads; raises AnnotationError(400) if invalid/missing."""
+    try:
+        image_path = resolve_child_path(PATHS['uploads'], image_name, extensions=_IMAGE_EXTENSIONS)
+    except PathSafetyError as e:
+        raise AnnotationError(400, f'非法图片路径: {image_name}') from e
     if not os.path.exists(image_path):
         raise AnnotationError(400, f'图片不存在: {image_name}')
     return image_path
 
 
 def _validate_model_path(model_name, install_path):
-    """Absolute model path; raises AnnotationError(400) if missing."""
-    model_path = os.path.abspath(os.path.join(install_path, 'models', model_name))
+    """Absolute model path under <install>/models; raises AnnotationError(400) if invalid/missing."""
+    models_dir = os.path.join(install_path, 'models')
+    try:
+        model_path = resolve_child_path(models_dir, model_name)
+    except PathSafetyError as e:
+        raise AnnotationError(400, f'非法模型路径: {model_name}') from e
     if not os.path.exists(model_path):
         raise AnnotationError(400, f'模型不存在: {model_name}')
     return model_path
@@ -154,27 +213,42 @@ def _resolve_python_path(install_path):
 
 
 def _collect_valid_images(image_names):
-    """Filter image_names to those existing in uploads. Returns (paths, names)."""
+    """Filter image_names to those existing in uploads. Returns (paths, names).
+
+    Each surviving name is containment-checked via resolve_child_path so a
+    traversal attempt cannot surface a filesystem path here.
+    """
     image_paths = []
     valid_image_names = []
     for img_name in image_names:
-        img_path = os.path.abspath(os.path.join(PATHS['uploads'], img_name))
+        try:
+            img_path = resolve_child_path(PATHS['uploads'], img_name, extensions=_IMAGE_EXTENSIONS)
+        except PathSafetyError:
+            continue
         if os.path.exists(img_path):
             image_paths.append(img_path)
             valid_image_names.append(img_name)
     return image_paths, valid_image_names
 
 
-def _run_inference(python_path, script, install_path, timeout):
+def _build_env(extra):
+    """Base child-process environment (copy of os.environ) plus YOLO-specific vars."""
+    env = dict(os.environ)
+    env.update(extra)
+    return env
+
+
+def _run_inference(python_path, script, install_path, env, timeout):
     """Run the YOLO script in a child process; return stdout.
 
-    Raises ``AnnotationError(500)`` on non-zero returncode; lets
-    ``subprocess.TimeoutExpired`` propagate to the handler.
+    Paths are supplied to the child via ``env`` (never interpolated into
+    ``script``). Raises ``AnnotationError(500)`` on non-zero returncode;
+    lets ``subprocess.TimeoutExpired`` propagate to the handler.
     """
     result = subprocess.run(
         [python_path, '-c', script],
         capture_output=True, text=True, cwd=install_path,
-        timeout=timeout, encoding='utf-8', errors='ignore',
+        timeout=timeout, encoding='utf-8', errors='ignore', env=env,
     )
     if result.returncode != 0:
         error_msg = result.stderr.strip() if result.stderr else '推理失败'
@@ -206,8 +280,13 @@ def _extract_json(output, include_output_fallback):
     return json.loads(json_str)
 
 
-def _build_single_script(model_path, image_path, confidence, device_literal):
-    """YOLO inference script for one image (JSON wrapped in markers)."""
+def _build_single_script(confidence, device_literal):
+    """YOLO inference script for one image (JSON wrapped in markers).
+
+    Model/image paths are read from environment variables at runtime - they
+    are NOT interpolated into this source string (C1). ``confidence`` and
+    ``device_literal`` are validated numeric/enum literals, safe to embed.
+    """
     return f'''
 import json
 import sys
@@ -216,10 +295,13 @@ import os
 # 禁用ultralytics的输出
 os.environ['YOLO_VERBOSE'] = 'False'
 
+model_path = os.environ['{_ENV_MODEL_PATH}']
+image_path = os.environ['{_ENV_IMAGE_PATH}']
+
 from ultralytics import YOLO
 
-model = YOLO(r"{model_path}")
-results = model(r"{image_path}", conf={confidence}, device={device_literal}, verbose=False)
+model = YOLO(model_path)
+results = model(image_path, conf={confidence}, device={device_literal}, verbose=False)
 
 annotations = []
 for result in results:
@@ -245,8 +327,14 @@ print("###JSON_END###")
 '''
 
 
-def _build_batch_script(model_path, image_paths_json, confidence, device_literal):
-    """YOLO inference script for a list of images (JSON wrapped in markers)."""
+def _build_batch_script(confidence, device_literal):
+    """YOLO inference script for a list of images (JSON wrapped in markers).
+
+    The model path and image-path list are read from environment variables
+    (``PH_MODEL_PATH`` / ``PH_IMAGE_PATHS_JSON``) at runtime - they are NOT
+    interpolated into this source string (C1). ``confidence`` and
+    ``device_literal`` are validated numeric/enum literals, safe to embed.
+    """
     return f'''
 import json
 import sys
@@ -255,10 +343,12 @@ import os
 # 禁用ultralytics的输出
 os.environ['YOLO_VERBOSE'] = 'False'
 
+model_path = os.environ['{_ENV_MODEL_PATH}']
+image_paths = json.loads(os.environ['{_ENV_IMAGE_PATHS_JSON}'])
+
 from ultralytics import YOLO
 
-model = YOLO(r"{model_path}")
-image_paths = {image_paths_json}
+model = YOLO(model_path)
 
 all_results = {{}}
 

@@ -51,4 +51,8 @@ def isolated_app(tmp_path, monkeypatch):
     monkeypatch.setitem(training_app.PATHS, "plugins_yolo11", str(yolo11_dir))
     monkeypatch.setitem(training_app.PATHS, "plugins_sam3_models", str(sam3_models_file))
 
-    yield training_app.app
+    # Build the app AFTER PATHS are redirected so _ensure_dirs/_init_data_files
+    # operate against tmp_path (the data files above already exist, so
+    # _init_data_files skips re-creating them). create_app() is the only
+    # public entry now - there is no module-level app instance.
+    yield training_app.create_app()

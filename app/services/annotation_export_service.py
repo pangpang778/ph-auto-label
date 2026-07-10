@@ -11,6 +11,7 @@ synchronizing the freeze.
 """
 import datetime
 import os
+import re
 import tempfile
 import zipfile
 from shutil import copyfile
@@ -63,12 +64,15 @@ def _parse_export_params(params):
         value = params.get(key)
         return float(value) if value is not None else default
 
+    raw_prefix = params.get('export_prefix', '') or ''
+    export_prefix = re.sub(r'[^A-Za-z0-9_-]', '_', raw_prefix)
+
     return (
         (_ratio('train_ratio', 0.7), _ratio('val_ratio', 0.2), _ratio('test_ratio', 0.1)),
         params.get('selected_classes', []),
         params.get('sample_selection', 'all'),
         params.get('export_data_type', 'yolo'),
-        params.get('export_prefix', ''),
+        export_prefix,
     )
 
 
@@ -86,9 +90,11 @@ def _list_export_images(annotations, sample_selection):
 
 
 def _compute_splits(images, ratios):
-    """Strict ratio split: 0-ratio splits are empty; remainder is dropped.
+    """Ratio split assigning any remainder to train so no image is dropped.
 
-    Preserves the original monolith's split accounting verbatim.
+    Preserves the original per-ratio counting (``int(total * ratio)``) but
+    hands the leftover ``total - (n_train+n_val+n_test)`` to train so rounding
+    never silently loses an image. Zero ratios stay empty.
     """
     train_ratio, val_ratio, test_ratio = ratios
     total_images = len(images)
@@ -107,6 +113,12 @@ def _compute_splits(images, ratios):
     if test_ratio > 0:
         test_count = int(total_images * test_ratio)
         test_images = images[test_start:test_start + test_count]
+
+    # Remainder from int() truncation goes to train (if train is active).
+    if train_ratio > 0:
+        used = len(train_images) + len(val_images) + len(test_images)
+        leftover = images[used:used + (total_images - used)]
+        train_images = train_images + leftover
 
     if train_ratio == 0:
         train_images = []
@@ -131,13 +143,39 @@ names: {selected_classes}
         f.write(data_yaml)
 
 
+def _under(path, base):
+    """True if realpath(path) is base itself or a descendant of it.
+
+    ``os.path.normcase`` makes the comparison case-insensitive on Windows,
+    where ``realpath`` may return different casings for the same logical
+    path (the documented source of intermittent false-negatives).
+    """
+    try:
+        base_nc = os.path.normcase(base)
+        common = os.path.commonpath([base_nc, os.path.normcase(os.path.realpath(path))])
+    except ValueError:
+        return False
+    return common == base_nc
+
+
 def _populate_splits(yolo_base, splits, annotations, selected_classes, sample_selection, export_prefix):
-    """Copy images + write YOLO label files for every split."""
+    """Copy images + write YOLO label files for every split.
+
+    ``export_prefix`` is pre-sanitized to ``[A-Za-z0-9_-]`` in
+    ``_parse_export_params``, so it can introduce no path separators; each
+    destination is additionally containment-checked under ``yolo_base``.
+    """
+    base_real = os.path.realpath(yolo_base)
     for split_name, split_images in splits:
+        img_dir = os.path.join(yolo_base, split_name, 'images')
+        label_dir = os.path.join(yolo_base, split_name, 'labels')
         for image_name in split_images:
             src_img_path = os.path.join(PATHS['uploads'], image_name)
             dst_img_name = f"{export_prefix}_{image_name}" if export_prefix else image_name
-            dst_img_path = os.path.join(yolo_base, split_name, 'images', dst_img_name)
+            dst_img_path = os.path.join(img_dir, dst_img_name)
+            if not _under(dst_img_path, base_real):
+                print(f"非法导出路径 '{dst_img_path}'")
+                continue
             try:
                 img = Image.open(src_img_path)
                 width, height = img.size
@@ -148,7 +186,7 @@ def _populate_splits(yolo_base, splits, annotations, selected_classes, sample_se
 
             base_name = os.path.splitext(image_name)[0]
             label_name = f"{export_prefix}_{base_name}.txt" if export_prefix else f"{base_name}.txt"
-            label_path = os.path.join(yolo_base, split_name, 'labels', label_name)
+            label_path = os.path.join(label_dir, label_name)
             _write_yolo_label_file(
                 label_path, annotations.get(image_name, []),
                 selected_classes, width, height, sample_selection,

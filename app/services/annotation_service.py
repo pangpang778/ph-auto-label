@@ -9,6 +9,7 @@ Closed-world contract (.omc/plans/api-freeze.md section 2): cross-domain
 callers (e.g. training_service) use ``read_annotations()`` / ``read_classes()``
 here, never ``app.repositories.annotation_repo`` directly.
 """
+import hashlib
 import json
 import logging
 import os
@@ -19,10 +20,12 @@ import filelock
 from PIL import Image
 
 from app.common.config import PATHS
+from app.common.path_safety import PathSafetyError, resolve_child_path
 from app.common.utils import color_for_index
 from app.repositories.annotation_repo import (
     read_annotations as _read_annotations_repo,
     read_classes as _read_classes_repo,
+    update_annotations as _update_annotations_repo,
     write_annotations as _write_annotations_repo,
     write_classes as _write_classes_repo,
 )
@@ -68,6 +71,11 @@ def write_classes(data: list) -> None:
 
 def write_annotations(data: dict) -> None:
     _write_annotations_repo(data)
+
+
+def update_annotations(mutator, *, timeout=10):
+    """Atomic RMW under the cross-process filelock (delegates to repo)."""
+    return _update_annotations_repo(mutator, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -135,14 +143,14 @@ def assign_class_colors_and_ids(annotations, existing_classes, id_suffix=""):
                 color = cls.get('color')
                 break
         if color is None:
-            color = '#{:06x}'.format(hash(cls_name) % 0x1000000)
+            color = '#{:06x}'.format(int(hashlib.sha1(cls_name.encode()).hexdigest(), 16) % 0x1000000)
             existing_classes.append({'name': cls_name, 'color': color})
             new_classes_added = True
         ann['color'] = color
         id_key = f"{cls_name}_{ann['points'][0][0]}_{ann['points'][0][1]}"
         if id_suffix:
             id_key = f"{id_key}_{id_suffix}"
-        ann['id'] = int(hash(id_key) % 1000000000)
+        ann['id'] = int(hashlib.sha1(id_key.encode()).hexdigest(), 16) % 1000000000
     return new_classes_added
 
 
@@ -178,31 +186,40 @@ def list_images():
 def delete_images(image_names):
     """Delete images + their annotations. Returns ``(deleted_count, errors)``.
 
-    Reads/writes annotations.json once for the whole batch (the per-image
-    rewrite in the original monolith is collapsed to a single read-modify-write;
-    the observable response shape and final persisted state are unchanged).
+    File deletion uses ``resolve_child_path`` for uploads containment (a
+    traversal attempt appends an error instead of 500). The annotations
+    update is an atomic RMW under the cross-process filelock via
+    ``update_annotations`` (the original read->modify->write raced with
+    concurrent saves); the observable return shape is unchanged.
     """
     deleted_count = 0
     errors = []
-    annotations = read_annotations()
-    annotations_changed = False
 
-    for image_name in image_names:
-        try:
-            image_path = os.path.join(PATHS['uploads'], image_name)
-            if os.path.exists(image_path):
-                os.remove(image_path)
-                deleted_count += 1
-                if image_name in annotations:
-                    del annotations[image_name]
-                    annotations_changed = True
-            else:
-                errors.append(f"图片 '{image_name}' 不存在")
-        except Exception as e:
-            errors.append(f"删除图片 '{image_name}' 失败: {str(e)}")
+    def _mutate(annotations):
+        nonlocal deleted_count
+        local_changed = False
+        for image_name in image_names:
+            try:
+                image_path = resolve_child_path(
+                    PATHS['uploads'], image_name, extensions=_IMAGE_EXTENSIONS,
+                )
+            except PathSafetyError as e:
+                errors.append(f"删除图片 '{image_name}' 失败: {str(e)}")
+                continue
+            try:
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+                    deleted_count += 1
+                    if image_name in annotations:
+                        del annotations[image_name]
+                        local_changed = True
+                else:
+                    errors.append(f"图片 '{image_name}' 不存在")
+            except Exception as e:
+                errors.append(f"删除图片 '{image_name}' 失败: {str(e)}")
+        return (annotations if local_changed else None, None)
 
-    if annotations_changed:
-        write_annotations(annotations)
+    update_annotations(_mutate)
 
     return deleted_count, errors
 
