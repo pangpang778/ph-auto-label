@@ -75,4 +75,13 @@ def get_active_model() -> dict:
 
 
 def set_active_model(model_id: str, model_name: str, model_path: str) -> None:
-    write_json_file(PATHS['active_model'], {"model_id": model_id, "model_name": model_name, "model_path": model_path, "updated_at": now_iso()})
+    """Set active_model.json under a cross-process lock (H7).
+
+    active_model.json previously had no lock sibling, so concurrent
+    activations could clobber each other's overwrite. The lock path is
+    resolved lazily from ``PATHS`` (not a module-level constant) so test
+    redirection of ``PATHS['active_model']`` takes effect without patching
+    a frozen constant.
+    """
+    with filelock.FileLock(PATHS['active_model'] + '.lock', timeout=10):
+        write_json_file(PATHS['active_model'], {"model_id": model_id, "model_name": model_name, "model_path": model_path, "updated_at": now_iso()})

@@ -71,3 +71,31 @@ def secure_save_path(base_dir, filename, *, extensions=None):
     if not safe:
         raise PathSafetyError('非法文件名')
     return resolve_child_path(base_dir, safe, extensions=extensions)
+
+
+def resolve_contained_path(base_dir, target_path):
+    """Resolve ``target_path`` (absolute or relative to ``base_dir``) and verify
+    it stays under ``base_dir``.
+
+    Unlike :func:`resolve_child_path` (which verifies a *lookup name* without
+    altering it), this accepts a path that may already be absolute - the
+    canonical case for user-controlled ``install_path`` / ``scenario_path``
+    values. Raises :class:`PathSafetyError` if the resolved path escapes
+    ``base_dir`` or is empty. Uses ``realpath`` + ``commonpath`` so ``..`` and
+    absolute-path injection are defeated on both POSIX and Windows.
+    """
+    if not target_path or not isinstance(target_path, str):
+        raise PathSafetyError('路径不能为空')
+    if not os.path.isabs(target_path):
+        target_path = os.path.join(base_dir, target_path)
+    target_real = os.path.realpath(target_path)
+    base_real = os.path.realpath(base_dir)
+    try:
+        base_nc = os.path.normcase(base_real)
+        common = os.path.commonpath([base_nc, os.path.normcase(target_real)])
+    except ValueError:
+        # Different drives (Windows) or otherwise incomparable.
+        raise PathSafetyError(f'非法路径: {target_path}')
+    if common != base_nc:
+        raise PathSafetyError(f'路径越界: {target_path}')
+    return target_real

@@ -51,6 +51,28 @@ def isolated_app(tmp_path, monkeypatch):
     monkeypatch.setitem(training_app.PATHS, "plugins_yolo11", str(yolo11_dir))
     monkeypatch.setitem(training_app.PATHS, "plugins_sam3_models", str(sam3_models_file))
 
+    # C3: repo modules freeze their filelock paths at import time
+    # (``_XXX_LOCK_PATH = PATHS[...] + '.lock'``). Redirect those constants to
+    # the tmp tree too, so (a) locking tests isolate per-test instead of
+    # serializing on a real repo-root lockfile, and (b) create_app()'s startup
+    # recovery (recover_orphaned_jobs -> filelock) locks tmp files, not the
+    # repo root. Without this, concurrency tests pass against the wrong lock
+    # and create stray ``*.lock`` files in the source tree.
+    from app.repositories import (  # noqa: E402
+        annotation_repo,
+        model_registry_repo,
+        timeline_repo,
+        train_jobs_repo,
+        training_splits_repo,
+    )
+    monkeypatch.setattr(annotation_repo, '_ANNOTATIONS_LOCK_PATH', training_app.PATHS['annotations'] + '.lock')
+    monkeypatch.setattr(annotation_repo, '_CLASSES_LOCK_PATH', training_app.PATHS['classes'] + '.lock')
+    monkeypatch.setattr(model_registry_repo, '_MODEL_REGISTRY_LOCK_PATH', training_app.PATHS['model_registry'] + '.lock')
+    monkeypatch.setattr(timeline_repo, '_TIMELINES_LOCK_PATH', training_app.PATHS['timelines'] + '.lock')
+    monkeypatch.setattr(timeline_repo, '_SCENARIO_LOCK_PATH', training_app.PATHS['scenario'] + '.lock')
+    monkeypatch.setattr(train_jobs_repo, '_TRAIN_JOBS_LOCK_PATH', training_app.PATHS['train_jobs'] + '.lock')
+    monkeypatch.setattr(training_splits_repo, '_TRAINING_SPLITS_LOCK_PATH', training_app.PATHS['training_splits'] + '.lock')
+
     # Build the app AFTER PATHS are redirected so _ensure_dirs/_init_data_files
     # operate against tmp_path (the data files above already exist, so
     # _init_data_files skips re-creating them). create_app() is the only

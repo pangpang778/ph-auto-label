@@ -15,11 +15,14 @@ isolated_app PATHS redirection.
 import json
 import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 import app as training_app  # noqa: E402
+from app.repositories.train_jobs_repo import upsert_train_job  # noqa: E402
 from app.services.training_job_runner import (  # noqa: E402
     _mark_completed,
     _mark_failed,
@@ -105,6 +108,7 @@ def test_resolve_trained_model_raises_when_no_weights(isolated_app, tmp_path):
 @pytest.mark.integration
 def test_prepare_job_dir_transitions_queued_to_running_and_persists(isolated_app):
     job = _minimal_job()
+    upsert_train_job(job)  # H4: helpers persist via mutate_train_job (job must exist on disk)
 
     job_dir = _prepare_job_dir(job)
 
@@ -175,6 +179,7 @@ def test_mark_completed_transitions_to_completed_with_weights_path(isolated_app)
     job = _minimal_job()
     job["status"] = "running"
     job["progress"] = 45
+    upsert_train_job(job)  # H4: _mark_completed persists via mutate_train_job
     run_dir = _make_run_dir_with_weights(job["id"])
     model_info = _register_trained_model(job, job["id"], run_dir)
 
@@ -200,6 +205,7 @@ def test_mark_failed_transitions_to_failed_and_caps_progress(isolated_app):
     job = _minimal_job()
     job["status"] = "running"
     job["progress"] = 45
+    upsert_train_job(job)  # H4: _mark_failed persists via mutate_train_job
 
     _mark_failed(job, RuntimeError("boom"))
 
@@ -224,6 +230,7 @@ def test_mark_failed_does_not_claim_100_progress(isolated_app):
     job = _minimal_job()
     job["status"] = "running"
     job["progress"] = 100  # hypothetical mid-run value
+    upsert_train_job(job)  # H4: _mark_failed persists via mutate_train_job
 
     _mark_failed(job, RuntimeError("late failure"))
 
@@ -245,6 +252,7 @@ def test_full_state_machine_queued_to_running_to_completed(isolated_app):
     and the registry gained a record pointing at it.
     """
     job = _minimal_job()
+    upsert_train_job(job)  # H4: helpers persist via mutate_train_job
 
     _prepare_job_dir(job)
     assert job["status"] == "running"
@@ -267,3 +275,137 @@ def test_full_state_machine_queued_to_running_to_completed(isolated_app):
     )
     assert active["model_id"] == model_info["model_id"]
     assert os.path.isfile(active["model_path"])
+
+
+# ---------------------------------------------------------------------------
+# C4: real run_training_job end-to-end with a fake ultralytics.YOLO
+# ---------------------------------------------------------------------------
+
+class _FakeTrainer:
+    def __init__(self, epoch):
+        self.epoch = epoch
+
+
+class _FakeYOLO:
+    """Stand-in for ultralytics.YOLO so run_training_job runs without GPU.
+
+    train() writes the artifacts the runner expects (weights/best.pt,
+    results.csv, results.png) and invokes the registered on_train_epoch_end
+    callback once per epoch so the H4 progress-persist path is exercised.
+    """
+
+    def __init__(self, base_model):
+        self.base_model = base_model
+        self._callbacks = {}
+
+    def add_callback(self, event, fn):
+        self._callbacks.setdefault(event, []).append(fn)
+
+    def train(self, **kwargs):
+        epochs = int(kwargs.get("epochs", 1))
+        run_dir = os.path.join(kwargs["project"], kwargs.get("name", "detector"))
+        weights_dir = os.path.join(run_dir, "weights")
+        os.makedirs(weights_dir, exist_ok=True)
+        for epoch in range(epochs):
+            trainer = _FakeTrainer(epoch)
+            for fn in self._callbacks.get("on_train_epoch_end", []):
+                fn(trainer)
+        Path(weights_dir, "best.pt").write_bytes(b"fake-trained-weights")
+        Path(run_dir, "results.csv").write_text(
+            "epoch,metrics/mAP50(B)\n1,0.5\n", encoding="utf-8"
+        )
+        Path(run_dir, "results.png").write_bytes(b"fake-png")
+
+
+def _seed_20_annotated_images():
+    """Seed uploads/ with 20 annotated images + classes (min for training)."""
+    anns = {}
+    for i in range(20):
+        name = f"train_img_{i}.png"
+        Image.new("RGB", (32, 32), color=(i, 0, 0)).save(
+            Path(training_app.PATHS["uploads"]) / name
+        )
+        anns[name] = [{"class": "part", "points": [[0, 0], [10, 0], [10, 10], [0, 10]], "type": "rectangle"}]
+    Path(training_app.PATHS["classes"]).write_text(
+        json.dumps([{"name": "part", "color": "#ffffff"}]), encoding="utf-8"
+    )
+    Path(training_app.PATHS["annotations"]).write_text(json.dumps(anns), encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_run_training_job_end_to_end_completes(isolated_app, monkeypatch):
+    """C4: real run_training_job transitions queued->running->completed and
+    registers the trained model, with ultralytics.YOLO faked (no GPU)."""
+    _seed_20_annotated_images()
+
+    fake_module = types.ModuleType("ultralytics")
+    fake_module.YOLO = _FakeYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_module)
+
+    from app.services import models_service
+    from app.services.training_job_runner import run_training_job
+    from app.services.training_service import build_train_job, training_readiness
+
+    job = build_train_job(
+        {"epochs": 2, "mode": "incremental"},
+        "incremental",
+        training_readiness(),
+        models_service.get_active_model(),
+    )
+    upsert_train_job(job)
+
+    run_training_job(job["id"])
+
+    jobs = json.loads(Path(training_app.PATHS["train_jobs"]).read_text(encoding="utf-8"))
+    completed = next(j for j in jobs if j["id"] == job["id"])
+    assert completed["status"] == "completed"
+    assert completed["progress"] == 100
+    assert os.path.isfile(completed["weights_path"])
+
+    registry = json.loads(
+        Path(training_app.PATHS["model_registry"]).read_text(encoding="utf-8")
+    )
+    assert len(registry) == 1
+    assert registry[0]["job_id"] == job["id"]
+
+    active = json.loads(
+        Path(training_app.PATHS["active_model"]).read_text(encoding="utf-8")
+    )
+    assert active["model_id"] == registry[0]["id"]
+
+
+@pytest.mark.integration
+def test_run_training_job_failure_marks_failed_and_cleans_dataset(isolated_app, monkeypatch):
+    """C4: when YOLO.train raises, run_training_job marks the job failed and
+    removes the per-job dataset copy (best-effort cleanup)."""
+    _seed_20_annotated_images()
+
+    class _BoomYOLO(_FakeYOLO):
+        def train(self, **kwargs):
+            raise RuntimeError("training exploded")
+
+    fake_module = types.ModuleType("ultralytics")
+    fake_module.YOLO = _BoomYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_module)
+
+    from app.services import models_service
+    from app.services.training_job_runner import run_training_job
+    from app.services.training_service import build_train_job, training_readiness
+
+    job = build_train_job(
+        {"epochs": 2, "mode": "incremental"},
+        "incremental",
+        training_readiness(),
+        models_service.get_active_model(),
+    )
+    upsert_train_job(job)
+
+    run_training_job(job["id"])
+
+    jobs = json.loads(Path(training_app.PATHS["train_jobs"]).read_text(encoding="utf-8"))
+    failed = next(j for j in jobs if j["id"] == job["id"])
+    assert failed["status"] == "failed"
+    assert "training exploded" in failed["message"]
+    # Dataset copy cleaned up by _cleanup_failed_dataset.
+    dataset_dir = os.path.join(training_app.PATHS["train_work"], job["id"], "dataset")
+    assert not os.path.isdir(dataset_dir)

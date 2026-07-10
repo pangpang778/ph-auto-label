@@ -11,13 +11,13 @@ from app.services.training_service import (
     build_train_job,
     delete_split_profile,
     get_train_job,
+    insert_train_job_if_idle,
     list_train_jobs,
     load_split_profile,
     resolve_training_device,
     run_training_job,
     save_split_profile,
     training_readiness,
-    update_train_job,
 )
 from training_artifacts import (
     ARTIFACT_CONTENT_TYPES,
@@ -178,14 +178,6 @@ def train_start():
     if mode not in {"initial", "incremental"}:
         mode = "incremental"
 
-    # H12: prevent concurrent training threads. Only "running" is checked (not
-    # "queued") because tests submit back-to-back jobs whose worker thread is
-    # mocked to no-op, leaving them permanently "queued" - blocking "queued"
-    # would reject the legitimate second submission in that flow.
-    existing = list_train_jobs()
-    if any(j.get("status") == "running" for j in existing):
-        return jsonify({"error": "已有训练任务在运行或排队中", "status": "busy"}), 409
-
     readiness = training_readiness()
     if mode == "initial" and not readiness.get("ready_for_initial"):
         return jsonify({"error": f"Need at least {readiness['min_for_initial']} annotated images for initial training", "readiness": readiness}), 400
@@ -196,7 +188,14 @@ def train_start():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    update_train_job(job)
+    # H5: atomic check-and-insert closes the TOCTOU where two concurrent
+    # POST /api/train/start both observed "no running job" and each launched a
+    # training thread (GPU OOM / artifact interleaving). Only "running" is
+    # blocked (not "queued") so the back-to-back test flow with a no-op worker
+    # still works.
+    if not insert_train_job_if_idle(job):
+        return jsonify({"error": "已有训练任务在运行或排队中", "status": "busy"}), 409
+
     t = threading.Thread(target=run_training_job, args=(job["id"], current_app.root_path), daemon=True)
     t.start()
     return jsonify({"message": "training started", "job": job})

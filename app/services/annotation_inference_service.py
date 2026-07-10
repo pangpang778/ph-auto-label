@@ -30,7 +30,7 @@ import subprocess
 import sys
 
 from app.common.config import PATHS
-from app.common.path_safety import PathSafetyError, resolve_child_path
+from app.common.path_safety import PathSafetyError, resolve_child_path, resolve_contained_path
 from app.repositories.annotation_repo import update_annotations
 from app.services import models_service
 from app.services.annotation_service import (
@@ -189,10 +189,19 @@ def _resolve_model_name(model_name):
 
 
 def _resolve_install_path(install_path):
-    """Make install_path absolute (relative to PATHS['root'])."""
-    if not os.path.isabs(install_path):
-        install_path = os.path.join(PATHS['root'], install_path)
-    return install_path
+    """Resolve install_path and verify it stays under PATHS['root'].
+
+    Previously this only joined relative paths and passed absolute paths
+    through unchecked - an attacker-chosen absolute ``install_path`` could
+    load a ``.pt`` from anywhere (RCE via ``torch.load`` inside ``YOLO()``).
+    Now delegates to the shared containment helper (C1 fix). Raises
+    ``AnnotationError(400)`` on escape so the inference routes return a
+    clean 400 instead of propagating ``PathSafetyError``.
+    """
+    try:
+        return resolve_contained_path(PATHS['root'], install_path)
+    except PathSafetyError as e:
+        raise AnnotationError(400, f'非法安装路径: {install_path}') from e
 
 
 def _validate_image_path(image_name):

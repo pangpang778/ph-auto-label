@@ -60,6 +60,30 @@ def upsert_train_job(job: dict) -> None:
     update_train_jobs(_mutator)
 
 
+def mutate_train_job(job_id: str, mutator, *, timeout=10):
+    """Atomically read-modify-write a single job by id (field-delta, H4).
+
+    ``mutator(current_job) -> (new_job_or_None, result)`` where ``new_job``
+    replaces the record (or ``None`` to skip the write) and ``result`` is
+    returned to the caller. Raises ``KeyError`` if ``job_id`` is not found.
+
+    Unlike :func:`upsert_train_job` (which wholesale-replaces with the
+    caller's dict), this re-reads the CURRENT on-disk record and applies only
+    the mutator's intended fields, so a stale in-memory job snapshot cannot
+    clobber crash-recovery (``recover_orphaned_jobs_atomic``) or concurrent
+    writers.
+    """
+    def _mutator(jobs):
+        for i, j in enumerate(jobs):
+            if j.get("id") == job_id:
+                new_job, result = mutator(j)
+                if new_job is not None:
+                    jobs[i] = new_job
+                return jobs, result
+        raise KeyError(job_id)
+    return update_train_jobs(_mutator, timeout=timeout)
+
+
 def recover_orphaned_jobs_atomic(*, timeout=10) -> int:
     """Mark running/queued train jobs as failed (process was interrupted).
 

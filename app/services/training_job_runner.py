@@ -19,7 +19,7 @@ import uuid
 
 from app.common.config import PATHS
 from app.common.utils import now_iso
-from app.repositories.train_jobs_repo import read_train_jobs, upsert_train_job
+from app.repositories.train_jobs_repo import mutate_train_job, read_train_jobs
 from app.services import models_service
 from training_artifacts import read_log_tail
 
@@ -91,35 +91,59 @@ def _load_job(job_id: str) -> dict | None:
     return next((x for x in jobs if x.get("id") == job_id), None)
 
 
+def _persist_job_delta(job_id: str, delta: dict) -> None:
+    """Field-delta persist (H4): merge ``delta`` onto the CURRENT on-disk job
+    record under the train-jobs lock. The runner keeps an in-memory ``job``
+    dict for local reads, but persistence re-reads the current record and
+    applies only ``delta`` - so a stale in-memory snapshot (e.g. ``status``
+    carried from before crash-recovery) cannot overwrite fields the runner did
+    not intend to change. Each checkpoint passes ONLY the fields it owns, so
+    ``recover_orphaned_jobs_atomic`` marking a job ``failed`` survives a later
+    epoch-callback persist (which does not include ``status``).
+    """
+    def _mutator(cur):
+        return {**cur, **delta}, None
+    mutate_train_job(job_id, _mutator)
+
+
 def _prepare_job_dir(job: dict) -> str:
     job_dir = os.path.join(PATHS['train_work'], job["id"])
     os.makedirs(job_dir, exist_ok=True)
     job["log_path"] = os.path.join(job_dir, "train.log")
-    job["status"] = "running"
-    job["progress"] = 5
-    job["message"] = "Preparing training dataset..."
-    job["epoch"] = 0
-    job["total_epochs"] = int(job.get("epochs", 50))
-    job["updated_at"] = now_iso()
     append_train_log(job, "Preparing training dataset...")
-    upsert_train_job(job)
+    delta = {
+        "status": "running",
+        "progress": 5,
+        "message": "Preparing training dataset...",
+        "epoch": 0,
+        "total_epochs": int(job.get("epochs", 50)),
+        "log_path": job["log_path"],
+        "log_tail": job.get("log_tail", ""),
+        "updated_at": now_iso(),
+    }
+    job.update(delta)
+    _persist_job_delta(job["id"], delta)
     return job_dir
 
 
 def _build_dataset_phase(job: dict, job_dir: str) -> dict:
     from app.services.training_service import build_yolo_training_dataset
     dataset = build_yolo_training_dataset(job_dir, job.get("split_config"))
-    job["dataset_dir"] = dataset["dataset_root"]
-    job["annotated_images"] = dataset["annotated_images"]
-    job["total_images"] = dataset["total_images"]
-    job["candidate_images"] = dataset["candidate_images"]
-    job["split_counts"] = dataset["split_counts"]
-    job["split_config"] = dataset["split_config"]
-    job["progress"] = 20
-    job["message"] = "Dataset prepared. Starting model training..."
-    job["updated_at"] = now_iso()
     append_train_log(job, f"Dataset prepared with split counts: {dataset['split_counts']}")
-    upsert_train_job(job)
+    delta = {
+        "dataset_dir": dataset["dataset_root"],
+        "annotated_images": dataset["annotated_images"],
+        "total_images": dataset["total_images"],
+        "candidate_images": dataset["candidate_images"],
+        "split_counts": dataset["split_counts"],
+        "split_config": dataset["split_config"],
+        "progress": 20,
+        "message": "Dataset prepared. Starting model training...",
+        "log_tail": job.get("log_tail", ""),
+        "updated_at": now_iso(),
+    }
+    job.update(delta)
+    _persist_job_delta(job["id"], delta)
     return dataset
 
 
@@ -129,11 +153,16 @@ def _train_model_phase(job: dict, job_dir: str, dataset: dict) -> str:
     job["resolved_base_model"] = base_model
     train_project = os.path.join(job_dir, "runs")
     model = YOLO(base_model)
-    job["progress"] = 45
-    job["message"] = "Training in progress..."
-    job["updated_at"] = now_iso()
     append_train_log(job, f"Training started: base_model={base_model}, device={job.get('device', 'cpu')}, epochs={job.get('epochs', 50)}")
-    upsert_train_job(job)
+    delta = {
+        "resolved_base_model": base_model,
+        "progress": 45,
+        "message": "Training in progress...",
+        "log_tail": job.get("log_tail", ""),
+        "updated_at": now_iso(),
+    }
+    job.update(delta)
+    _persist_job_delta(job["id"], delta)
     _attach_epoch_callback(model, job)
     model.train(
         data=dataset["data_yaml"],
@@ -173,8 +202,17 @@ def _attach_epoch_callback(model, job: dict) -> None:
         append_train_log(job, job["message"])
         now = time.time()
         if epoch % persist_every == 0 or now - persist_state["last_time"] >= 5:
-            job["updated_at"] = now_iso()
-            upsert_train_job(job)
+            # H4: persist ONLY epoch/progress/message/log_tail/updated_at - NOT
+            # status - so recover_orphaned_jobs_atomic's "failed" survives a
+            # late epoch callback from a stale runner snapshot.
+            _persist_job_delta(job["id"], {
+                "epoch": job["epoch"],
+                "total_epochs": total_epochs,
+                "progress": job["progress"],
+                "message": job["message"],
+                "log_tail": job.get("log_tail", ""),
+                "updated_at": now_iso(),
+            })
             persist_state["last_time"] = now
             persist_state["last_epoch"] = epoch
 
@@ -196,19 +234,19 @@ def _resolve_trained_model(run_dir: str) -> str:
 
 def _register_trained_model(job: dict, job_id: str, run_dir: str) -> dict:
     trained_model = _resolve_trained_model(run_dir)
-    version = models_service.next_model_version(job.get("mode", "incremental"))
-    model_filename = f"{version}.pt"
-    model_dst = os.path.join(models_service.get_models_dir(), model_filename)
-    shutil.copy2(trained_model, model_dst)
     results_csv = os.path.join(run_dir, "results.csv")
     results_png = os.path.join(run_dir, "results.png")
     metrics = _extract_metrics_from_results_csv(results_csv)
     model_id = f"model_{uuid.uuid4().hex[:10]}"
-    model_record = {
+    # H6: copy weights to a temp name FIRST (no lock) so a copy failure leaves
+    # no registry record; the atomic register then renames temp -> <version>.pt
+    # and appends the record under one lock (version allocated from current
+    # registry, so two concurrent completions cannot pick the same version).
+    models_dir = models_service.get_models_dir()
+    temp_weights_path = os.path.join(models_dir, f".tmp_{model_id}.pt")
+    shutil.copy2(trained_model, temp_weights_path)
+    base_record = {
         "id": model_id,
-        "version": version,
-        "name": model_filename,
-        "path": model_dst,
         "parent_model": job.get("base_model", ""),
         "mode": job.get("mode", "incremental"),
         "metrics": metrics,
@@ -221,7 +259,18 @@ def _register_trained_model(job: dict, job_id: str, run_dir: str) -> dict:
         "run_dir": run_dir,
         "split_counts": job.get("split_counts", {}),
     }
-    models_service.append_record(model_record)
+    try:
+        version, model_filename, model_dst = models_service.register_trained_model_record(
+            job.get("mode", "incremental"), base_record, temp_weights_path
+        )
+    except Exception:
+        # Atomic registration failed: clean up the temp weights and re-raise so
+        # the runner's _mark_failed handles the job (no dangling record).
+        try:
+            os.remove(temp_weights_path)
+        except OSError:
+            pass
+        raise
     models_service.set_active(model_id=model_id, model_name=model_filename, model_path=model_dst)
     return {
         "model_id": model_id,
@@ -237,31 +286,39 @@ def _register_trained_model(job: dict, job_id: str, run_dir: str) -> dict:
 
 
 def _mark_completed(job: dict, model_info: dict) -> None:
-    job["status"] = "completed"
-    job["progress"] = 100
-    job["message"] = f"Training completed. Model {model_info['model_filename']} is ready."
-    job["artifact_path"] = model_info["model_dst"]
-    job["weights_path"] = model_info["trained_model"]
-    job["metrics"] = model_info["metrics"]
-    job["model_id"] = model_info["model_id"]
-    job["version"] = model_info["version"]
-    job["run_dir"] = model_info["run_dir"]
-    job["results_csv"] = model_info["results_csv"]
-    job["results_png"] = model_info["results_png"]
-    job["epoch"] = int(job.get("epochs", 50))
-    job["total_epochs"] = int(job.get("epochs", 50))
-    job["updated_at"] = now_iso()
-    append_train_log(job, job["message"])
-    upsert_train_job(job)
+    append_train_log(job, f"Training completed. Model {model_info['model_filename']} is ready.")
+    delta = {
+        "status": "completed",
+        "progress": 100,
+        "message": f"Training completed. Model {model_info['model_filename']} is ready.",
+        "artifact_path": model_info["model_dst"],
+        "weights_path": model_info["trained_model"],
+        "metrics": model_info["metrics"],
+        "model_id": model_info["model_id"],
+        "version": model_info["version"],
+        "run_dir": model_info["run_dir"],
+        "results_csv": model_info["results_csv"],
+        "results_png": model_info["results_png"],
+        "epoch": int(job.get("epochs", 50)),
+        "total_epochs": int(job.get("epochs", 50)),
+        "log_tail": job.get("log_tail", ""),
+        "updated_at": now_iso(),
+    }
+    job.update(delta)
+    _persist_job_delta(job["id"], delta)
 
 
 def _mark_failed(job: dict, exc: BaseException) -> None:
-    job["status"] = "failed"
-    # ponytail: 100 is reserved for completed; a failed job keeps its last
-    # known progress (capped at 99) so status is the authoritative signal.
-    job["progress"] = min(int(job.get("progress", 0) or 0), 99)
-    job["message"] = f"Training failed: {str(exc)}"
-    job["error"] = traceback.format_exc()
-    job["updated_at"] = now_iso()
-    append_train_log(job, job["message"])
-    upsert_train_job(job)
+    append_train_log(job, f"Training failed: {str(exc)}")
+    delta = {
+        "status": "failed",
+        # ponytail: 100 is reserved for completed; a failed job keeps its last
+        # known progress (capped at 99) so status is the authoritative signal.
+        "progress": min(int(job.get("progress", 0) or 0), 99),
+        "message": f"Training failed: {str(exc)}",
+        "error": traceback.format_exc(),
+        "log_tail": job.get("log_tail", ""),
+        "updated_at": now_iso(),
+    }
+    job.update(delta)
+    _persist_job_delta(job["id"], delta)

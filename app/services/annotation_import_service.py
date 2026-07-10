@@ -11,7 +11,7 @@ import os
 
 from app.common.config import PATHS
 from app.common.path_safety import PathSafetyError, secure_save_path
-from app.services.annotation_service import read_annotations, read_classes, write_annotations, write_classes
+from app.services.annotation_service import read_classes, update_annotations, update_classes
 
 _IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif')
 _JSON_EXTENSIONS = ('.json',)
@@ -21,14 +21,24 @@ def import_labelme_dataset(files):
     """Import a LabelMe dataset. ``files`` is a list of ``(filename, bytes)``.
 
     Returns ``{"message", "files", "annotations_processed"}``.
+
+    H2: the slow image-writing + JSON parsing happens lock-free; only the
+    final merge into annotations.json/classes.json is done under the
+    ``update_annotations`` / ``update_classes`` locks. Previously a bare
+    ``read_annotations()`` -> mutate -> ``write_annotations()`` overwrote the
+    whole file with a stale snapshot, racing concurrent single-image saves
+    and batch inference. Now only the newly-discovered classes and the
+    imported images' annotations are merged into the current locked state.
     """
-    classes = read_classes()
-    annotations = read_annotations()
-    existing_class_names = {cls['name'] for cls in classes}
+    existing_classes = read_classes()
+    existing_names = {cls['name'] for cls in existing_classes}
+    # Local copy mutated during parse so color lookup works; only entries not
+    # in ``existing_names`` are merged under the lock below.
+    local_classes = list(existing_classes)
 
     image_files, json_files = _split_labelme_files(files)
     uploaded_files = []
-    processed_annotations = 0
+    parsed = {}  # safe_image_name -> image_annotations (lock-free parse)
 
     for image_filename, image_bytes in image_files.items():
         # secure_save_path runs secure_filename + containment: a name with '..'
@@ -56,16 +66,29 @@ def import_labelme_dataset(files):
             json_content_bytes = json_files.get(orig_json)
         if json_content_bytes is not None:
             json_content = json.loads(json_content_bytes.decode('utf-8'))
-            image_annotations = _parse_labelme_shapes(json_content, classes, existing_class_names)
-            annotations[safe_image_name] = image_annotations
-            processed_annotations += 1
+            image_annotations = _parse_labelme_shapes(json_content, local_classes, existing_names)
+            parsed[safe_image_name] = image_annotations
 
-    write_classes(classes)
-    write_annotations(annotations)
+    new_classes = [cls for cls in local_classes if cls['name'] not in existing_names]
+    if new_classes:
+        def _merge_classes(current):
+            have = {c.get('name') for c in current}
+            for cls in new_classes:
+                if cls['name'] not in have:
+                    current.append(cls)
+            return current, None
+        update_classes(_merge_classes)
+
+    if parsed:
+        def _merge_annotations(current):
+            current.update(parsed)
+            return current, None
+        update_annotations(_merge_annotations)
+
     return {
         'message': 'LabelMe dataset uploaded successfully',
         'files': uploaded_files,
-        'annotations_processed': processed_annotations,
+        'annotations_processed': len(parsed),
     }
 
 

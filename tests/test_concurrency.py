@@ -49,6 +49,7 @@ def test_concurrent_writes_to_distinct_images_all_persist_intact(isolated_app):
     errors = []
 
     def writer(i):
+        client = isolated_app.test_client()  # H13: per-thread (test_client isn't thread-safe)
         try:
             resp = client.post(f"/api/annotations/img_{i}.jpg", json=_payload_for(i))
             if resp.status_code != 200:
@@ -97,6 +98,7 @@ def test_concurrent_writes_to_same_image_no_interleave_or_corruption(isolated_ap
     errors = []
 
     def writer(tag):
+        client = isolated_app.test_client()  # H13: per-thread
         try:
             resp = client.post("/api/annotations/shared.jpg", json=posted_payloads[tag])
             if resp.status_code != 200:
@@ -144,6 +146,7 @@ def test_concurrent_mixed_same_and_distinct_images(isolated_app):
     errors = []
 
     def writer(target):
+        client = isolated_app.test_client()  # H13: per-thread
         try:
             resp = client.post(f"/api/annotations/{target}", json=payloads[target])
             if resp.status_code != 200:
@@ -197,6 +200,7 @@ def test_concurrent_writes_do_not_clobber_existing_other_images(isolated_app):
     errors = []
 
     def writer(i):
+        client = isolated_app.test_client()  # H13: per-thread
         try:
             resp = client.post(f"/api/annotations/burst_{i}.jpg", json=_payload_for(i))
             if resp.status_code != 200:

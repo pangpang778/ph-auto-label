@@ -1,7 +1,9 @@
 """Video-timeline domain service: SOP scenario parsing + timeline segment normalization."""
 import os
 
-from app.repositories.timeline_repo import read_scenario, read_timelines, write_scenario, write_timelines  # noqa: F401  (re-exported for blueprint)
+from app.common.config import PATHS
+from app.common.path_safety import PathSafetyError, resolve_contained_path
+from app.repositories.timeline_repo import read_scenario, read_timelines, update_scenario, update_timelines  # noqa: F401  (re-exported for blueprint)
 
 
 def normalize_timeline_segment(raw, video_name=''):
@@ -41,10 +43,17 @@ def load_yaml_file(path):
 
 
 def parse_sop_scenario(scenario_dir):
-    scenario_dir = os.path.abspath(scenario_dir)
+    # Containment: scenario_dir is user-controlled (POST /api/scenario/import).
+    # Reject anything that resolves outside PATHS['root'] so the endpoint
+    # cannot read arbitrary local directories (C2 fix). Error messages do not
+    # echo the absolute path - the blueprint returns str(exc) to the client.
+    try:
+        scenario_dir = resolve_contained_path(PATHS['root'], scenario_dir)
+    except PathSafetyError as exc:
+        raise ValueError('非法场景路径: 路径必须在项目目录内') from exc
     process_path = os.path.join(scenario_dir, 'process.yaml')
     if not os.path.exists(process_path):
-        raise FileNotFoundError(f'process.yaml not found in {scenario_dir}')
+        raise FileNotFoundError('process.yaml not found in scenario directory')
     process_doc = load_yaml_file(process_path)
     process = process_doc.get('process', {})
     steps, action_ids, object_ids = _parse_process_steps(process_doc)

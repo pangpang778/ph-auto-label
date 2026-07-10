@@ -14,7 +14,7 @@ from app.services.video_timeline_service import (
     normalize_timeline_segment,
     parse_sop_scenario,
     read_scenario,
-    write_scenario,
+    update_scenario,
 )
 from plugins.video_inference import list_available_videos, resolve_video_path
 
@@ -76,7 +76,7 @@ def save_sop_scenario():
     scenario.setdefault('steps', [])
     scenario.setdefault('object_classes', [])
     scenario.setdefault('action_labels', [])
-    write_scenario(scenario)
+    update_scenario(lambda _: (scenario, None))
     if scenario.get('object_classes'):
         sync_object_classes_to_labels(scenario.get('object_classes', []), replace=bool(scenario.get('replace_classes')))
     return jsonify({'message': 'Scenario saved', 'scenario': scenario})
@@ -91,7 +91,7 @@ def import_sop_scenario():
         return jsonify({'error': 'scenario_path is required'}), 400
     try:
         scenario = parse_sop_scenario(scenario_path)
-        write_scenario(scenario)
+        update_scenario(lambda _: (scenario, None))
         classes = sync_object_classes_to_labels(scenario.get('object_classes', []), replace=bool(data.get('replace_classes', True)))
         return jsonify({'message': 'Scenario imported', 'scenario': scenario, 'classes': classes})
     except Exception as exc:

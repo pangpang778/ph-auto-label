@@ -22,7 +22,7 @@ from PIL import Image
 from app.common.config import PATHS
 from app.common.utils import now_iso
 from app.services.annotation_service import read_annotations, read_classes
-from app.repositories.train_jobs_repo import read_train_jobs, recover_orphaned_jobs_atomic, upsert_train_job
+from app.repositories.train_jobs_repo import read_train_jobs, recover_orphaned_jobs_atomic, update_train_jobs, upsert_train_job
 from app.repositories.training_splits_repo import (
     delete_split_profile_atomic,
     load_split_profile,
@@ -513,6 +513,24 @@ def get_train_job(job_id: str) -> dict | None:
 def update_train_job(job: dict) -> None:
     """Upsert a single train-job record."""
     upsert_train_job(job)
+
+
+def insert_train_job_if_idle(job: dict) -> bool:
+    """Atomic check-and-insert (H5 TOCTOU fix).
+
+    Inserts ``job`` only if no existing job has ``status == "running"``.
+    Returns True if inserted, False if a running job blocks. The check and
+    insert happen under one ``update_train_jobs`` lock acquisition so two
+    concurrent POST /api/train/start cannot both observe "no running job"
+    and each launch a training thread. Only "running" is blocked (not
+    "queued") so the back-to-back test flow with a no-op worker still works.
+    """
+    def _mutator(jobs):
+        if any(j.get("status") == "running" for j in jobs):
+            return None, False
+        jobs.append(job)
+        return jobs, True
+    return update_train_jobs(_mutator)
 
 
 def delete_split_profile(profile_id: str = "default") -> None:

@@ -15,7 +15,7 @@ import time
 
 from app.common.config import PATHS
 from app.common.json_store import read_json_file
-from app.common.path_safety import PathSafetyError, resolve_child_path
+from app.common.path_safety import PathSafetyError, resolve_child_path, resolve_contained_path
 from app.repositories.model_registry_repo import (
     MODEL_REGISTRY_LOCK,
     append_model_registry_record as append_record,
@@ -60,23 +60,12 @@ def _resolve_install_path(install_path):
     """Make install_path absolute and verify it stays under PATHS['root'].
 
     ``install_path`` originates from the ``X-Install-Path`` header / query
-    param (user-controlled). An absolute value previously escaped the
-    project root; we now reject any resolved path that is not contained
-    under ``PATHS['root']`` (H2b fix).
+    param (user-controlled). Delegates to the shared
+    :func:`app.common.path_safety.resolve_contained_path` so an absolute value
+    cannot escape the project root (H2b fix). Raises
+    :class:`PathSafetyError` on escape - the blueprint maps it to HTTP 400.
     """
-    if not install_path:
-        raise PathSafetyError('安装路径不能为空')
-    if not os.path.isabs(install_path):
-        install_path = os.path.join(PATHS['root'], install_path)
-    install_path = os.path.realpath(install_path)
-    root_real = os.path.realpath(PATHS['root'])
-    try:
-        common = os.path.commonpath([root_real, install_path])
-    except ValueError:
-        raise PathSafetyError(f'非法安装路径: {install_path}')
-    if common != root_real:
-        raise PathSafetyError(f'安装路径越界: {install_path}')
-    return install_path
+    return resolve_contained_path(PATHS['root'], install_path)
 
 
 # Backward-compat public alias; callers (blueprint) import ``resolve_install_path``.
@@ -131,14 +120,53 @@ def _latest_version_tag(models: list[dict]) -> tuple[int, int]:
     return major, minor
 
 
-def next_model_version(mode: str) -> str:
-    models = read_model_registry()
+def _next_version_for(models: list[dict], mode: str) -> str:
+    """Next version tag computed from an in-hand registry list."""
     ma, mi = _latest_version_tag(models)
     if ma == 0 and mi == 0:
         return "v1.0"
     if mode == "initial":
         return f"v{ma + 1}.0"
     return f"v{ma}.{mi + 1}"
+
+
+def next_model_version(mode: str) -> str:
+    """Next version tag given the current registry (non-atomic read).
+
+    For the training runner's atomic registration use
+    :func:`register_trained_model_record` instead - it allocates the version
+    INSIDE the registry lock so two concurrent completions cannot both compute
+    the same version and clobber each other's weights file (H6).
+    """
+    return _next_version_for(read_model_registry(), mode)
+
+
+def register_trained_model_record(mode: str, base_record: dict, temp_weights_path: str) -> tuple[str, str, str]:
+    """Atomically reserve a model version + append its registry record (H6).
+
+    Computes the next version from the CURRENT registry, renames
+    ``temp_weights_path`` to ``<models_dir>/<version>.pt``, and appends the
+    record - all under one ``update_model_registry`` lock acquisition, so two
+    concurrent training completions cannot both compute the same version and
+    clobber each other's weights file. Returns ``(version, model_filename,
+    model_dst)``.
+
+    The caller copies the trained weights to ``temp_weights_path`` BEFORE
+    calling this (so a copy failure leaves no registry record); if this call
+    fails the caller must remove ``temp_weights_path``.
+    """
+    models_dir = get_models_dir()
+
+    def _mutator(models):
+        version = _next_version_for(models, mode)
+        model_filename = f"{version}.pt"
+        model_dst = os.path.join(models_dir, model_filename)
+        os.replace(temp_weights_path, model_dst)
+        record = {**base_record, "version": version, "name": model_filename, "path": model_dst}
+        models.append(record)
+        return models, (version, model_filename, model_dst)
+
+    return update_model_registry(_mutator)
 
 
 def activate_model(model_id: str) -> dict:

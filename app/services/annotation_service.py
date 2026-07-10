@@ -88,16 +88,20 @@ def update_classes(mutator, *, timeout=10):
 # ---------------------------------------------------------------------------
 
 def sync_object_classes_to_labels(object_classes, replace=False):
-    classes = [] if replace else read_classes()
-    existing = {c.get('name') for c in classes}
-    for index, obj in enumerate(object_classes):
-        name = obj.get('id') or obj.get('name') if isinstance(obj, dict) else str(obj)
-        display_name = obj.get('name') if isinstance(obj, dict) else name
-        if name and name not in existing:
-            classes.append({'name': name, 'display_name': display_name, 'color': color_for_index(len(classes))})
-            existing.add(name)
-    write_classes(classes)
-    return classes
+    """Sync object classes into classes.json atomically (H8: was a bare
+    ``read_classes`` -> mutate -> ``write_classes`` that raced concurrent
+    class additions). Returns the resulting classes list."""
+    def _mutate(current):
+        classes = [] if replace else current
+        existing = {c.get('name') for c in classes}
+        for index, obj in enumerate(object_classes):
+            name = obj.get('id') or obj.get('name') if isinstance(obj, dict) else str(obj)
+            display_name = obj.get('name') if isinstance(obj, dict) else name
+            if name and name not in existing:
+                classes.append({'name': name, 'display_name': display_name, 'color': color_for_index(len(classes))})
+                existing.add(name)
+        return classes, classes
+    return update_classes(_mutate)
 
 
 def parse_target_classes(raw_value):
@@ -192,39 +196,46 @@ def delete_images(image_names):
     """Delete images + their annotations. Returns ``(deleted_count, errors)``.
 
     File deletion uses ``resolve_child_path`` for uploads containment (a
-    traversal attempt appends an error instead of 500). The annotations
-    update is an atomic RMW under the cross-process filelock via
-    ``update_annotations`` (the original read->modify->write raced with
-    concurrent saves); the observable return shape is unchanged.
+    traversal attempt appends an error instead of 500). H3: file deletion
+    (slow disk I/O) happens OUTSIDE the annotations lock - previously it ran
+    inside the ``update_annotations`` mutator, holding the cross-process lock
+    for the whole bulk-delete duration and blocking concurrent saves (10s
+    timeout -> 503). Only the quick annotation-key removal is now done under
+    the lock. The observable return shape is unchanged.
     """
     deleted_count = 0
     errors = []
+    removed_names = []
 
-    def _mutate(annotations):
-        nonlocal deleted_count
-        local_changed = False
-        for image_name in image_names:
-            try:
-                image_path = resolve_child_path(
-                    PATHS['uploads'], image_name, extensions=_IMAGE_EXTENSIONS,
-                )
-            except PathSafetyError as e:
-                errors.append(f"删除图片 '{image_name}' 失败: {str(e)}")
-                continue
-            try:
-                if os.path.exists(image_path):
-                    os.remove(image_path)
-                    deleted_count += 1
-                    if image_name in annotations:
-                        del annotations[image_name]
-                        local_changed = True
-                else:
-                    errors.append(f"图片 '{image_name}' 不存在")
-            except Exception as e:
-                errors.append(f"删除图片 '{image_name}' 失败: {str(e)}")
-        return (annotations if local_changed else None, None)
+    # File deletion: lock-free (image files have no lock relationship).
+    for image_name in image_names:
+        try:
+            image_path = resolve_child_path(
+                PATHS['uploads'], image_name, extensions=_IMAGE_EXTENSIONS,
+            )
+        except PathSafetyError as e:
+            errors.append(f"删除图片 '{image_name}' 失败: {str(e)}")
+            continue
+        try:
+            if os.path.exists(image_path):
+                os.remove(image_path)
+                deleted_count += 1
+                removed_names.append(image_name)
+            else:
+                errors.append(f"图片 '{image_name}' 不存在")
+        except Exception as e:
+            errors.append(f"删除图片 '{image_name}' 失败: {str(e)}")
 
-    update_annotations(_mutate)
+    # Short critical section: drop annotation keys for the deleted images.
+    if removed_names:
+        def _mutate(annotations):
+            changed = False
+            for image_name in removed_names:
+                if image_name in annotations:
+                    del annotations[image_name]
+                    changed = True
+            return (annotations if changed else None, None)
+        update_annotations(_mutate)
 
     return deleted_count, errors
 

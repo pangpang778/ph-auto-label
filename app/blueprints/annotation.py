@@ -27,7 +27,7 @@ from app.services.annotation_service import (
     read_annotations,
     read_classes,
     save_image_annotations,
-    write_classes,
+    update_classes,
 )
 from plugins.sam3_service import sam3_service
 
@@ -71,7 +71,10 @@ def save_classes():
     data = request.json
     if not isinstance(data, list):
         return jsonify({'error': 'classes 必须是列表'}), 400
-    write_classes(data)
+    # H8: route through the atomic update_classes (full replace) instead of
+    # calling write_classes directly - blueprints must not bypass the service
+    # RMW layer.
+    update_classes(lambda _: (data, None))
     return jsonify({'message': 'Classes saved successfully'})
 
 
