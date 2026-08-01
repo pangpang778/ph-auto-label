@@ -34,6 +34,7 @@ def isolated_app(tmp_path, monkeypatch):
         "classes": (annotations_dir / "classes.json", [{"name": "part", "color": "#fff"}]),
         "training_splits": (annotations_dir / "training_splits.json", {}),
         "train_jobs": (annotations_dir / "train_jobs.json", []),
+        "evaluations": (annotations_dir / "evaluations.json", []),
         "model_registry": (annotations_dir / "model_registry.json", []),
         "active_model": (annotations_dir / "active_model.json",
                          {"model_id": "", "model_name": "", "model_path": ""}),
@@ -60,6 +61,7 @@ def isolated_app(tmp_path, monkeypatch):
     # and create stray ``*.lock`` files in the source tree.
     from app.repositories import (  # noqa: E402
         annotation_repo,
+        evaluation_repo,
         model_registry_repo,
         timeline_repo,
         train_jobs_repo,
@@ -72,6 +74,7 @@ def isolated_app(tmp_path, monkeypatch):
     monkeypatch.setattr(timeline_repo, '_SCENARIO_LOCK_PATH', training_app.PATHS['scenario'] + '.lock')
     monkeypatch.setattr(train_jobs_repo, '_TRAIN_JOBS_LOCK_PATH', training_app.PATHS['train_jobs'] + '.lock')
     monkeypatch.setattr(training_splits_repo, '_TRAINING_SPLITS_LOCK_PATH', training_app.PATHS['training_splits'] + '.lock')
+    monkeypatch.setattr(evaluation_repo, '_EVALUATIONS_LOCK_PATH', training_app.PATHS['evaluations'] + '.lock')
 
     # Build the app AFTER PATHS are redirected so _ensure_dirs/_init_data_files
     # operate against tmp_path (the data files above already exist, so

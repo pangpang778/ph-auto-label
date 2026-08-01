@@ -26,6 +26,7 @@ PATHS = {
     "timelines": os.path.join(_ROOT, "static", "annotations", "timelines.json"),
     "scenario": os.path.join(_ROOT, "static", "annotations", "sop_scenario.json"),
     "train_work": os.path.join(_ROOT, "static", "train_work"),
+    "evaluations": os.path.join(_ROOT, "static", "annotations", "evaluations.json"),
     "plugins_yolo11": os.path.join(_ROOT, "plugins", "yolo11"),
     "plugins_sam3_models": os.path.join(_ROOT, "plugins", "sam3", "models", "model.pt"),
 }

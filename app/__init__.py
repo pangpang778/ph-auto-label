@@ -88,6 +88,7 @@ def _init_data_files():
         "timelines": {},
         "scenario": {"scenario_id": "", "name": "", "steps": [], "object_classes": [], "action_labels": []},
         "train_jobs": [],
+        "evaluations": [],
         "model_registry": [],
         "active_model": {"model_id": "", "model_name": "", "model_path": ""},
         "training_splits": {},
@@ -126,11 +127,13 @@ def create_app():
 
     # Deferred imports avoid any module-load cycles.
     from app.blueprints.annotation import bp as annotation_bp
+    from app.blueprints.evaluation import bp as evaluation_bp
     from app.blueprints.models import bp as models_bp
     from app.blueprints.training import bp as training_bp
     from app.blueprints.video_timeline import bp as video_timeline_bp
     from app.blueprints.video_test import bp as video_test_bp
     app.register_blueprint(annotation_bp)
+    app.register_blueprint(evaluation_bp)
     app.register_blueprint(models_bp)
     app.register_blueprint(training_bp)
     app.register_blueprint(video_timeline_bp)

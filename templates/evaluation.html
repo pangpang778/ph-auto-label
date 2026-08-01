@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型评估与对比 - PH</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='all.min.css') }}">
+    <style>
+        /* ---- Evaluation page (Apple design language, self-contained) ---- */
+        :root {
+            --ev-bg: #f5f5f7;
+            --ev-surface: rgba(255,255,255,0.82);
+            --ev-elevated: #ffffff;
+            --ev-primary: #007aff;
+            --ev-primary-hover: #0051d5;
+            --ev-success: #34c759;
+            --ev-danger: #ff3b30;
+            --ev-text: #1d1d1f;
+            --ev-text-2: #6e6e73;
+            --ev-border: rgba(0,0,0,0.08);
+            --ev-border-strong: rgba(0,0,0,0.16);
+            --ev-shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+            --ev-shadow-md: 0 4px 16px rgba(0,0,0,0.06);
+            --ev-shadow-lg: 0 12px 32px rgba(0,0,0,0.10);
+            --ev-radius: 14px;
+            --ev-radius-lg: 18px;
+            --ev-ease: cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body {
+            margin: 0;
+            background: var(--ev-bg);
+            color: var(--ev-text);
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', Inter, 'Segoe UI', Roboto, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            font-size: 15px;
+            line-height: 1.6;
+        }
+
+        .ev-navbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 22px;
+            height: 54px;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            background: rgba(255,255,255,0.72);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border-bottom: 1px solid var(--ev-border);
+            box-shadow: var(--ev-shadow-sm);
+        }
+        .ev-brand { display: flex; align-items: baseline; gap: 10px; }
+        .ev-brand h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+        .ev-brand .ver { font-size: 12px; color: var(--ev-text-2); font-weight: 500; }
+        .ev-nav-links { display: flex; gap: 8px; }
+        .ev-nav-links a {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 6px 12px; border-radius: 999px;
+            text-decoration: none; color: var(--ev-text);
+            font-size: 13px; font-weight: 500;
+            transition: background var(--ev-ease), color var(--ev-ease);
+        }
+        .ev-nav-links a:hover { background: rgba(0,122,255,0.10); color: var(--ev-primary); }
+        .ev-nav-links a.active { background: var(--ev-primary); color: #fff; }
+
+        .ev-wrap { max-width: 1180px; margin: 0 auto; padding: 24px 22px 64px; display: flex; flex-direction: column; gap: 20px; }
+
+        .ev-card {
+            background: var(--ev-surface);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid var(--ev-border);
+            border-radius: var(--ev-radius-lg);
+            box-shadow: var(--ev-shadow-md);
+            padding: 20px 22px;
+        }
+        .ev-card h2 {
+            margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .ev-card .ev-sub { margin: 0 0 16px; color: var(--ev-text-2); font-size: 13px; }
+
+        .ev-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .ev-select, .ev-input {
+            height: 34px; padding: 0 12px; border-radius: 10px;
+            border: 1px solid var(--ev-border-strong);
+            background: var(--ev-elevated); color: var(--ev-text);
+            font-size: 14px; font-family: inherit; outline: none;
+            transition: border-color var(--ev-ease), box-shadow var(--ev-ease);
+            min-width: 220px;
+        }
+        .ev-select:focus, .ev-input:focus { border-color: var(--ev-primary); box-shadow: 0 0 0 3px rgba(0,122,255,0.15); }
+
+        .ev-btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            height: 34px; padding: 0 14px; border-radius: 10px;
+            border: 1px solid transparent; cursor: pointer;
+            font-size: 13px; font-weight: 500; font-family: inherit;
+            background: rgba(120,120,128,0.12); color: var(--ev-text);
+            transition: background var(--ev-ease), color var(--ev-ease), transform var(--ev-ease), box-shadow var(--ev-ease);
+            white-space: nowrap; line-height: 1; text-decoration: none;
+        }
+        .ev-btn:hover { background: rgba(120,120,128,0.18); }
+        .ev-btn:active { transform: scale(0.97); }
+        .ev-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .ev-btn-primary { background: var(--ev-primary); color: #fff; box-shadow: 0 1px 2px rgba(0,122,255,0.25); }
+        .ev-btn-primary:hover { background: var(--ev-primary-hover); color: #fff; }
+        .ev-btn-success { background: rgba(52,199,89,0.14); color: #1a7c3e; border: 1px solid rgba(52,199,89,0.24); }
+        .ev-btn-success:hover { background: rgba(52,199,89,0.20); color: #145e30; }
+        .ev-btn-ghost { background: transparent; border: 1px solid var(--ev-border-strong); }
+        .ev-btn-ghost:hover { background: rgba(0,0,0,0.04); }
+
+        .ev-progress {
+            width: 100%; height: 8px; border-radius: 999px;
+            background: rgba(0,0,0,0.08); overflow: hidden; margin-top: 12px;
+        }
+        .ev-progress > div {
+            height: 100%; width: 0%;
+            background: linear-gradient(90deg, var(--ev-primary), #5ac8fa);
+            border-radius: 999px; transition: width 240ms var(--ev-ease);
+        }
+        .ev-status { font-size: 13px; color: var(--ev-text-2); margin-top: 8px; }
+        .ev-status.error { color: var(--ev-danger); }
+        .ev-status.success { color: #1a7c3e; }
+        .ev-hint { font-size: 12px; color: var(--ev-text-2); }
+
+        .ev-toggle { display: inline-flex; background: rgba(0,0,0,0.06); border-radius: 999px; padding: 3px; gap: 2px; }
+        .ev-toggle button {
+            border: none; background: transparent; cursor: pointer;
+            padding: 6px 16px; border-radius: 999px; font-size: 13px; font-weight: 500;
+            color: var(--ev-text-2); font-family: inherit; transition: all var(--ev-ease);
+        }
+        .ev-toggle button.active { background: var(--ev-elevated); color: var(--ev-text); box-shadow: var(--ev-shadow-sm); }
+
+        .ev-table-wrap { overflow-x: auto; border-radius: var(--ev-radius); border: 1px solid var(--ev-border); }
+        table.ev-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--ev-elevated); }
+        .ev-table th, .ev-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--ev-border); white-space: nowrap; }
+        .ev-table th { background: rgba(0,0,0,0.03); font-weight: 600; color: var(--ev-text-2); font-size: 12px; text-transform: none; }
+        .ev-table tbody tr:last-child td { border-bottom: none; }
+        .ev-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+        .ev-table td.best-cell { background: rgba(52,199,89,0.18); font-weight: 600; color: #145e30; }
+        .ev-perclass { cursor: pointer; color: var(--ev-primary); }
+        .ev-perclass:hover { text-decoration: underline; }
+        .ev-perclass-list { display: none; margin-top: 6px; padding: 8px 10px; background: rgba(0,0,0,0.03); border-radius: 8px; font-size: 12px; }
+        .ev-perclass-list.open { display: block; }
+        .ev-perclass-list .pc-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+
+        .ev-records-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; padding-right: 4px; }
+        .ev-record-item {
+            display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+            border: 1px solid var(--ev-border); border-radius: var(--ev-radius);
+            background: var(--ev-elevated); cursor: pointer; transition: all var(--ev-ease);
+        }
+        .ev-record-item:hover { border-color: var(--ev-primary); box-shadow: 0 2px 8px rgba(0,122,255,0.10); }
+        .ev-record-item.selected { border-color: var(--ev-primary); background: rgba(0,122,255,0.06); }
+        .ev-record-item input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--ev-primary); }
+        .ev-record-item .ev-rec-name { font-weight: 500; }
+        .ev-record-item .ev-rec-meta { font-size: 12px; color: var(--ev-text-2); display: flex; gap: 10px; flex-wrap: wrap; }
+        .ev-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; }
+        .ev-badge.completed { background: rgba(52,199,89,0.16); color: #1a7c3e; }
+        .ev-badge.failed { background: rgba(255,59,48,0.14); color: #b00020; }
+        .ev-badge.running, .ev-badge.queued { background: rgba(0,122,255,0.14); color: #0051d5; }
+
+        .ev-chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 900px) { .ev-chart-grid { grid-template-columns: 1fr; } }
+        .ev-chart-box { position: relative; height: 320px; }
+        .ev-empty { color: var(--ev-text-2); font-size: 13px; padding: 18px; text-align: center; }
+
+        .ev-toast {
+            position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+            background: rgba(28,28,30,0.92); color: #fff; padding: 10px 18px; border-radius: 12px;
+            font-size: 13px; opacity: 0; pointer-events: none; transition: all 240ms var(--ev-ease);
+            z-index: 200; box-shadow: var(--ev-shadow-lg); backdrop-filter: blur(10px);
+        }
+        .ev-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    </style>
+</head>
+<body>
+    <header class="ev-navbar">
+        <div class="ev-brand">
+            <h1><i class="fas fa-chart-line"></i> 模型评估与对比</h1>
+            <span class="ver">PH v1.0</span>
+        </div>
+        <nav class="ev-nav-links">
+            <a href="/"><i class="fas fa-arrow-left"></i> 返回标注</a>
+            <a href="/video-test"><i class="fas fa-film"></i> 视频测试</a>
+            <a href="/evaluation" class="active"><i class="fas fa-chart-line"></i> 评估对比</a>
+        </nav>
+    </header>
+
+    <div class="ev-wrap">
+        <!-- 1. 评估启动 -->
+        <section class="ev-card">
+            <h2><i class="fas fa-play-circle"></i> 评估启动</h2>
+            <p class="ev-sub">选择一个模型，在验证/测试集上运行评估。同一模型同时仅允许一个评估任务。</p>
+            <div class="ev-row">
+                <select id="evModelSelect" class="ev-select"><option value="">-- 加载中 --</option></select>
+                <button id="evStartBtn" class="ev-btn ev-btn-primary"><i class="fas fa-play"></i> 开始评估</button>
+                <button id="evRefreshModelsBtn" class="ev-btn ev-btn-ghost" title="刷新模型列表"><i class="fas fa-sync"></i></button>
+            </div>
+            <div id="evLaunchStatus" class="ev-status" style="display:none;">
+                <div id="evLaunchText"></div>
+                <div class="ev-progress"><div id="evProgressBar"></div></div>
+            </div>
+        </section>
+
+        <!-- 2. 对比选择 -->
+        <section class="ev-card">
+            <h2><i class="fas fa-list-check"></i> 对比选择</h2>
+            <p class="ev-sub">勾选至少 2 条评估记录以生成对比表与趋势图。</p>
+            <div class="ev-row" style="margin-bottom:12px;">
+                <button id="evRefreshRecordsBtn" class="ev-btn ev-btn-ghost"><i class="fas fa-sync"></i> 刷新记录</button>
+                <span id="evSelectionCount" class="ev-hint">已选 0 条</span>
+            </div>
+            <div id="evRecordsList" class="ev-records-list"><div class="ev-empty">加载中...</div></div>
+        </section>
+
+        <!-- 3. 对比表 -->
+        <section class="ev-card">
+            <div class="ev-row" style="justify-content: space-between; margin-bottom: 12px;">
+                <h2 style="margin:0;"><i class="fas fa-table"></i> 对比表</h2>
+                <div class="ev-toggle" id="evMetricToggle">
+                    <button data-split="val" class="active">验证集 (val)</button>
+                    <button data-split="test">测试集 (test)</button>
+                </div>
+            </div>
+            <div id="evCompareTable" class="ev-table-wrap"><div class="ev-empty">请勾选至少 2 条评估记录</div></div>
+        </section>
+
+        <!-- 4. 趋势图 -->
+        <section class="ev-card">
+            <h2><i class="fas fa-chart-line"></i> 趋势图</h2>
+            <p class="ev-sub">按评估时间排列，展示各模型 mAP 演进。</p>
+            <div class="ev-chart-box"><canvas id="evTrendChart"></canvas></div>
+        </section>
+
+        <!-- 5. PR 曲线 -->
+        <section class="ev-card">
+            <div class="ev-row" style="justify-content: space-between; margin-bottom: 8px;">
+                <h2 style="margin:0;"><i class="fas fa-bullseye"></i> PR 曲线</h2>
+                <select id="evPrRecordSelect" class="ev-select" style="min-width:300px;"><option value="">-- 选择评估记录 --</option></select>
+            </div>
+            <p class="ev-sub">选择一条记录查看其 Precision-Recall 曲线（默认验证集）。</p>
+            <div class="ev-chart-box"><canvas id="evPrChart"></canvas></div>
+        </section>
+
+        <!-- 6. 导出 -->
+        <section class="ev-card">
+            <h2><i class="fas fa-download"></i> 导出</h2>
+            <p class="ev-sub">导出已选评估记录的指标（每条单独下载）。</p>
+            <div class="ev-row">
+                <button id="evExportJsonBtn" class="ev-btn ev-btn-success" disabled><i class="fas fa-file-code"></i> 导出 JSON</button>
+                <button id="evExportCsvBtn" class="ev-btn ev-btn-success" disabled><i class="fas fa-file-csv"></i> 导出 CSV</button>
+            </div>
+        </section>
+    </div>
+
+    <div id="evToast" class="ev-toast"></div>
+
+    <script src="{{ url_for('static', filename='vendor/chart.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/evaluation.js') }}"></script>
+</body>
+</html>

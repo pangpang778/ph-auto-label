@@ -355,3 +355,169 @@ function handleSettingsSave(e) {
 }
 
 // 处理键盘快捷键
+
+// ============================================================
+// Model Evaluation - per-row 评估 button in the model registry
+// (training_ui.js renders the registry table; models.js augments
+// each row with an evaluation launcher + inline result area).
+// Conforms to the evaluation API + schema contract.
+// ============================================================
+(function () {
+    'use strict';
+
+    var POLL_INTERVAL = 1500;
+    // recordId -> setTimeout handle, so we can stop polling per-row
+    var pollers = {};
+
+    function escapeHtmlEval(value) {
+        return String(value == null ? '' : value).replace(/[&<>'"]/g, function (ch) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch];
+        });
+    }
+    function fmtNumEval(v, digits) {
+        var n = Number(v);
+        if (!isFinite(n)) return '-';
+        return n.toFixed(digits == null ? 3 : digits);
+    }
+
+    // Extract the model id from a registry row by reading the activate button's
+    // onclick attribute (rendered by training_ui.js as activateModel('<id>')).
+    function modelIdFromRow(row) {
+        var btn = row.querySelector('button[onclick*="activateModel"]');
+        if (!btn) return null;
+        var m = (btn.getAttribute('onclick') || '').match(/activateModel\(\s*['"]([^'"]+)['"]/);
+        return m ? m[1] : null;
+    }
+
+    function ensureEvalCell(row) {
+        var actions = row.querySelector('.artifact-actions');
+        if (!actions) return null;
+        if (actions.querySelector('.eval-launch-btn')) return actions;
+        var modelId = modelIdFromRow(row);
+        if (!modelId) return null;
+
+        var btn = document.createElement('button');
+        btn.className = 'btn btn-small btn-info eval-launch-btn';
+        btn.type = 'button';
+        btn.innerHTML = '<i class="fas fa-chart-line"></i> 评估';
+        btn.addEventListener('click', function () { startRowEvaluation(modelId, row); });
+        actions.appendChild(btn);
+
+        // inline result/progress area beneath the actions cell
+        var result = document.createElement('div');
+        result.className = 'eval-row-result';
+        result.style.cssText = 'margin-top:6px;font-size:12px;color:#6e6e73;';
+        // place after the actions div inside the last <td>
+        var td = actions.closest('td');
+        if (td) td.appendChild(result);
+        return actions;
+    }
+
+    function setRowResult(row, html, level) {
+        var td = row.querySelector('.artifact-actions') && row.querySelector('.artifact-actions').closest('td');
+        if (!td) return;
+        var result = td.querySelector('.eval-row-result');
+        if (!result) {
+            result = document.createElement('div');
+            result.className = 'eval-row-result';
+            result.style.cssText = 'margin-top:6px;font-size:12px;';
+            td.appendChild(result);
+        }
+        result.innerHTML = html;
+        var color = level === 'error' ? '#ff3b30' : (level === 'success' ? '#1a7c3e' : '#6e6e73');
+        result.style.color = color;
+    }
+
+    function setRowProgress(row, percent) {
+        setRowResult(row,
+            '<div style="display:flex;align-items:center;gap:8px;">' +
+                '<span>评估中... ' + Math.max(0, Math.min(100, Math.round(percent))) + '%</span>' +
+                '<div style="flex:1;max-width:120px;height:6px;border-radius:999px;background:rgba(0,0,0,0.08);overflow:hidden;">' +
+                    '<div style="height:100%;width:' + Math.max(0, Math.min(100, percent)) + '%;background:#007aff;border-radius:999px;"></div>' +
+                '</div>' +
+            '</div>', null);
+    }
+
+    function startRowEvaluation(modelId, row) {
+        fetch('/api/models/' + encodeURIComponent(modelId) + '/evaluate', { method: 'POST' })
+            .then(function (resp) {
+                return resp.json().then(function (data) {
+                    return { ok: resp.ok, status: resp.status, data: data };
+                });
+            })
+            .then(function (r) {
+                if (r.status === 409) {
+                    var msg = (r.data && r.data.error) || '训练中，暂无法评估';
+                    setRowResult(row, escapeHtmlEval(msg), 'error');
+                    if (typeof showToast === 'function') showToast(msg);
+                    return;
+                }
+                if (!r.ok || !r.data || !r.data.id) {
+                    var err = (r.data && r.data.error) || ('启动评估失败 (' + r.status + ')');
+                    setRowResult(row, escapeHtmlEval(err), 'error');
+                    if (typeof showToast === 'function') showToast(err);
+                    return;
+                }
+                setRowProgress(row, 0);
+                pollRowEval(r.data.id, row);
+            })
+            .catch(function (e) {
+                setRowResult(row, '网络错误: ' + escapeHtmlEval(e && e.message), 'error');
+            });
+    }
+
+    function pollRowEval(recordId, row) {
+        if (pollers[recordId]) { clearTimeout(pollers[recordId]); }
+        var tick = function () {
+            fetch('/api/evaluations/' + encodeURIComponent(recordId))
+                .then(function (resp) { return resp.json(); })
+                .then(function (rec) {
+                    if (!rec) { pollers[recordId] = setTimeout(tick, POLL_INTERVAL); return; }
+                    var progress = Math.max(0, Math.min(100, Number(rec.progress || 0)));
+                    if (rec.status === 'completed' || rec.status === 'failed') {
+                        delete pollers[recordId];
+                        if (rec.status === 'failed') {
+                            setRowResult(row, '评估失败：' + escapeHtmlEval(rec.error || '未知错误'), 'error');
+                        } else {
+                            var m = rec.val || {};
+                            setRowResult(row,
+                                '<div>mAP@0.5: <strong>' + escapeHtmlEval(fmtNumEval(m.map50)) + '</strong> · ' +
+                                'mAP@0.5:0.95: <strong>' + escapeHtmlEval(fmtNumEval(m.map50_95)) + '</strong></div>' +
+                                '<a href="/evaluation" style="color:#007aff;text-decoration:none;">查看对比 -&gt;</a>',
+                                'success');
+                        }
+                        return;
+                    }
+                    setRowProgress(row, progress);
+                    pollers[recordId] = setTimeout(tick, POLL_INTERVAL);
+                })
+                .catch(function () { pollers[recordId] = setTimeout(tick, POLL_INTERVAL * 2); });
+        };
+        pollers[recordId] = setTimeout(tick, POLL_INTERVAL);
+    }
+
+    // Augment registry rows whenever the panel is (re)rendered.
+    function augmentRegistry() {
+        var panel = document.getElementById('modelRegistryPanel');
+        if (!panel) return;
+        var rows = panel.querySelectorAll('table tbody tr');
+        rows.forEach(function (row) { ensureEvalCell(row); });
+    }
+
+    // The registry is rendered by training_ui.js on demand (modal open / refresh).
+    // Observe the panel so 评估 buttons are injected whenever rows appear.
+    function setupRegistryObserver() {
+        var panel = document.getElementById('modelRegistryPanel');
+        if (!panel) return;
+        augmentRegistry();
+        if (typeof MutationObserver === 'undefined') return;
+        var observer = new MutationObserver(function () { augmentRegistry(); });
+        observer.observe(panel, { childList: true, subtree: true });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', setupRegistryObserver);
+    } else {
+        setupRegistryObserver();
+    }
+})();
