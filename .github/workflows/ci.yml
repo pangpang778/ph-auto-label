@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest ruff
+
+      - name: Lint
+        run: ruff check app tests
+
+      - name: Test
+        timeout-minutes: 15
+        run: pytest
+
+  open-code-review:
+    name: OpenCodeReview
+    needs: lint-and-test
+    # Enable only after the repository LLM credentials have been configured.
+    if: github.event_name == 'pull_request' && vars.OCR_REVIEW_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Review successful CI changes
+        id: ocr
+        uses: alibaba/open-code-review@v1.9.2
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ secrets.OCR_LLM_MODEL }}
+          llm_use_anthropic: ${{ secrets.OCR_LLM_USE_ANTHROPIC }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          language: Chinese
+          review_concurrency: '4'
+          incremental: 'true'
+
+      - name: Post review decision summary
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ocr-decision-summary -->';
+            const result = JSON.parse(fs.readFileSync('/tmp/ocr-result.json', 'utf8'));
+            const comments = result.comments || [];
+            const levels = ['critical', 'high', 'medium', 'low'];
+            const counts = Object.fromEntries(levels.map(level => [level, 0]));
+
+            for (const comment of comments) {
+              const level = String(comment.severity || 'low').toLowerCase();
+              counts[levels.includes(level) ? level : 'low'] += 1;
+            }
+
+            const decision = counts.critical || counts.high
+              ? '⛔ 禁止合并（BLOCK）：存在 Critical 或 High 问题，修复后再合并。'
+              : counts.medium
+                ? '🟡 需要人工决策（MANUAL REVIEW）：存在 Medium 问题，维护者需确认处理方式。'
+                : '✅ 可以合并（PASS）：不存在 Critical、High 或 Medium 问题。';
+
+            const labels = {
+              critical: '🚨 Critical',
+              high: '🔴 High',
+              medium: '🟡 Medium',
+              low: '🟢 Low',
+            };
+            const table = levels
+              .map(level => `| ${labels[level]} | ${counts[level]} |`)
+              .join('\n');
+            const topFindings = comments
+              .filter(comment => ['critical', 'high', 'medium'].includes(String(comment.severity).toLowerCase()))
+              .sort((a, b) => levels.indexOf(String(a.severity).toLowerCase()) - levels.indexOf(String(b.severity).toLowerCase()))
+              .slice(0, 8)
+              .map(comment => {
+                const text = String(comment.content || '').replace(/\s+/g, ' ').slice(0, 240);
+                const location = `${comment.path || 'unknown'}:${comment.start_line || '?'}`;
+                return `- **${labels[String(comment.severity).toLowerCase()] || '🟢 Low'}** \`${location}\` - ${text}`;
+              })
+              .join('\n') || '- ✅ 没有 Critical、High 或 Medium 级别的问题。';
+            const elapsed = result.summary?.elapsed || 'unknown';
+            const body = [
+              marker,
+              '## 🧾 OpenCodeReview 合并结论',
+              '',
+              `**${decision}**`,
+              '',
+              '| 级别 | 数量 |',
+              '| --- | ---: |',
+              table,
+              '',
+              '### 🔎 最高风险问题（按 Critical → High → Medium 排序）',
+              topFindings,
+              '',
+              `📌 已审查 ${result.summary?.files_reviewed ?? 0} 个文件，耗时 ${elapsed}。完整明细见行内评论和工作流产物。`,
+            ].join('\n');
+            const { data: existing } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const previous = existing.find(comment => comment.body.includes(marker));
+
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+            if (counts.critical || counts.high) {
+              core.setFailed(
+                `OpenCodeReview found ${counts.critical} Critical and ${counts.high} High finding(s).`,
+              );
+            }
