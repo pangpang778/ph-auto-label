@@ -13,12 +13,13 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   lint-and-test:
     name: Lint and Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,6 +49,9 @@ jobs:
     if: github.event_name == 'pull_request' && vars.OCR_REVIEW_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
