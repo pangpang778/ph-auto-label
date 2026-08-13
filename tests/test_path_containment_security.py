@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 import app as training_app  # noqa: E402
-from app.common.path_safety import PathSafetyError  # noqa: E402
+from app.common.path_safety import PathSafetyError, resolve_contained_path  # noqa: E402
 from app.services.annotation_inference_service import (  # noqa: E402
     AnnotationError,
     _resolve_install_path as inference_resolve_install_path,
@@ -60,6 +60,13 @@ def test_inference_resolve_install_path_accepts_relative_under_root(isolated_app
 def test_models_resolve_install_path_rejects_absolute_outside_root(isolated_app):
     with pytest.raises(PathSafetyError):
         resolve_install_path("C:/Windows/System32")
+
+
+@pytest.mark.unit
+def test_resolve_contained_path_rejects_windows_path_on_posix():
+    if sys.platform != "win32":
+        with pytest.raises(PathSafetyError):
+            resolve_contained_path("/tmp/project", "C:/Windows/System32")
 
 
 @pytest.mark.unit

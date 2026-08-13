@@ -16,6 +16,7 @@ Both raise :class:`PathSafetyError` (a ``ValueError`` subclass) so callers can
 map them to a clean 400/403 without leaking internals.
 """
 import os
+import ntpath
 
 from werkzeug.utils import secure_filename
 
@@ -86,6 +87,9 @@ def resolve_contained_path(base_dir, target_path):
     """
     if not target_path or not isinstance(target_path, str):
         raise PathSafetyError('路径不能为空')
+    if ntpath.isabs(target_path) and not os.path.isabs(target_path):
+        # Reject Windows drive/UNC paths when this code runs on POSIX.
+        raise PathSafetyError('invalid absolute path')
     if not os.path.isabs(target_path):
         target_path = os.path.join(base_dir, target_path)
     target_real = os.path.realpath(target_path)
