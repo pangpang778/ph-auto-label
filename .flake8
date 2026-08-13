@@ -1,4 +1,0 @@
-[flake8]
-# Existing code has a legacy formatting/dead-import baseline. Keep lint active
-# in CI while new and touched code is brought into compliance incrementally.
-ignore = E302,E303,E305,E402,E501,F401,F841
