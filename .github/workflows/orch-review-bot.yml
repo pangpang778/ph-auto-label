@@ -63,9 +63,9 @@ jobs:
           echo "orch_exit=$ORCH_EXIT" >> "$GITHUB_OUTPUT"
           cat /tmp/orch-review-report.md
 
-          if grep -qiE '\b(CRITICAL|HIGH|BLOCK)\b' /tmp/orch-review-report.md; then
+          if [ "$ORCH_EXIT" -ne 0 ] || [ ! -s /tmp/orch-review-report.md ]; then
             echo "verdict=REQUEST_CHANGES" >> "$GITHUB_OUTPUT"
-          elif [ "$ORCH_EXIT" -ne 0 ]; then
+          elif grep -qiE '\b(CRITICAL|HIGH|BLOCK)\b' /tmp/orch-review-report.md; then
             echo "verdict=REQUEST_CHANGES" >> "$GITHUB_OUTPUT"
           else
             echo "verdict=APPROVE" >> "$GITHUB_OUTPUT"

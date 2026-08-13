@@ -56,7 +56,7 @@ jobs:
 
       - name: Review successful CI changes
         id: ocr
-        uses: alibaba/open-code-review@v1.9.2
+        uses: alibaba/open-code-review@5b37b5f8e225f42e2cf410c550e400083df83610 # v1.9.2
         with:
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
