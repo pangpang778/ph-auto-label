@@ -1,0 +1,96 @@
+name: ORCH Review Bot
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  orch-review:
+    name: Run /orch-review and post review
+    if: |
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    # Requires a self-hosted runner with Claude Code CLI installed and authenticated.
+    # Add the 'claude-code' label to the runner to avoid picking up generic self-hosted runners.
+    runs-on: [self-hosted, claude-code]
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Prefer the first pull request linked to the workflow run.
+          PR_NUMBER="${{ github.event.workflow_run.pull_requests[0].number }}"
+          if [ -z "$PR_NUMBER" ]; then
+            # Fallback: search open PRs matching the head SHA.
+            PR_NUMBER=$(gh pr list --repo "${{ github.repository }}" \
+              --json number,headRefOid \
+              --jq '.[] | select(.headRefOid == "${{ github.event.workflow_run.head_sha }}") | .number' \
+              --state open | head -n 1)
+          fi
+          if [ -z "$PR_NUMBER" ]; then
+            echo "Could not resolve PR number for workflow run."
+            exit 1
+          fi
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          persist-credentials: false
+
+      - name: Run /orch-review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Adjust this command to match your installed Claude Code CLI.
+          # Common forms: claude "/orch-review"  or  claude -p "/orch-review"
+          ORCH_COMMAND: ${{ vars.ORCH_REVIEW_COMMAND || 'claude "/orch-review"' }}
+        run: |
+          set +e
+          eval "$ORCH_COMMAND" > /tmp/orch-review-report.md 2>&1
+          ORCH_EXIT=$?
+          set -e
+
+          echo "orch_exit=$ORCH_EXIT"
+          echo "orch_exit=$ORCH_EXIT" >> "$GITHUB_OUTPUT"
+          cat /tmp/orch-review-report.md
+
+          if grep -qiE '\b(CRITICAL|HIGH|BLOCK)\b' /tmp/orch-review-report.md; then
+            echo "verdict=REQUEST_CHANGES" >> "$GITHUB_OUTPUT"
+          elif [ "$ORCH_EXIT" -ne 0 ]; then
+            echo "verdict=REQUEST_CHANGES" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=APPROVE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare review body
+        run: |
+          # GitHub PR review bodies are limited to ~65536 characters.
+          # Keep a header plus the first 60000 bytes of the report.
+          {
+            echo "## /orch-review Report"
+            echo ""
+            head -c 60000 /tmp/orch-review-report.md
+          } > /tmp/review-body.md
+
+      - name: Post PR review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          VERDICT: ${{ steps.review.outputs.verdict }}
+        run: |
+          if [ "$VERDICT" = "APPROVE" ]; then
+            gh pr review "$PR_NUMBER" --approve --body-file /tmp/review-body.md
+            gh pr comment "$PR_NUMBER" --body \
+              "✅ /orch-review passed. This PR is approved by the bot; please proceed with manual merge when ready."
+          else
+            gh pr review "$PR_NUMBER" --request-changes --body-file /tmp/review-body.md
+          fi
