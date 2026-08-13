@@ -148,3 +148,9 @@ jobs:
                 body,
               });
             }
+
+            if (counts.critical || counts.high) {
+              core.setFailed(
+                `OpenCodeReview found ${counts.critical} Critical and ${counts.high} High finding(s).`,
+              );
+            }
