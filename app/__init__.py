@@ -16,7 +16,7 @@ import json
 import logging
 import os
 
-from flask import Flask
+from flask import Flask, jsonify
 from flask_cors import CORS
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
@@ -123,6 +123,11 @@ def create_app():
         if allowed else ["http://127.0.0.1:5000", "http://localhost:5000"]
     )
     CORS(app, origins=cors_origins)
+
+    @app.get("/api/health")
+    def health_check():
+        """Lightweight liveness probe that does not depend on model services."""
+        return jsonify({"status": "ok"})
 
     # Deferred imports avoid any module-load cycles.
     from app.blueprints.annotation import bp as annotation_bp
