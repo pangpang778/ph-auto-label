@@ -115,14 +115,8 @@ def create_app():
         app.logger.warning("SECRET_KEY 未设置，使用随机值，session 将在重启后失效")
     app.config["SECRET_KEY"] = secret
 
-    # CORS origins configurable via ALLOWED_ORIGINS (comma-separated). Fallback
-    # is local-dev only; PRODUCTION MUST set ALLOWED_ORIGINS explicitly.
-    allowed = os.environ.get("ALLOWED_ORIGINS")
-    cors_origins = (
-        [o.strip() for o in allowed.split(",") if o.strip()]
-        if allowed else ["http://127.0.0.1:5000", "http://localhost:5000"]
-    )
-    CORS(app, origins=cors_origins)
+    # Allow browser clients to make authenticated API requests from any origin.
+    CORS(app, origins="*", supports_credentials=True)
 
     @app.get("/api/health")
     def health_check():
