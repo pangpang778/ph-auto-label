@@ -55,7 +55,7 @@ jobs:
           persist-credentials: false
 
       - name: Review successful CI changes
-        uses: alibaba/open-code-review@v1.2.4
+        uses: alibaba/open-code-review@v1.9.2
         with:
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
