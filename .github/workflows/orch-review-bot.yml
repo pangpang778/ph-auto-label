@@ -19,6 +19,7 @@ jobs:
     # Requires a self-hosted runner with Claude Code CLI installed and authenticated.
     # Add the 'claude-code' label to the runner to avoid picking up generic self-hosted runners.
     runs-on: [self-hosted, claude-code]
+    timeout-minutes: 20
     steps:
       - name: Resolve PR number
         id: pr
