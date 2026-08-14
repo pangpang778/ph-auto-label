@@ -60,6 +60,7 @@ steps:
         "PyYAML>=6.0" \
         pytest \
         ruff
+      echo "$agent_python/bin" >> "$GITHUB_PATH"
 
 safe-outputs:
   add-comment:
@@ -120,6 +121,11 @@ Implementation requirements:
    upgrade tooling, install packages, or run the full application dependency
    set. Use the issue's verification commands as written; if `ruff` or
    `pytest` is not on PATH, invoke it as `python -m ruff` or `python -m pytest`.
+8. Run only the verification commands required by the issue. Do not add a
+   full-suite run or retry the same command through alternate environments
+   after the prepared environment is available.
+9. After `safeoutputs create_pull_request` returns success, make no further
+   tool calls. End the run immediately.
 
 Never include credentials, secret values, private endpoints, or model settings
 in commits, PR bodies, issue comments, logs, or agent output.
