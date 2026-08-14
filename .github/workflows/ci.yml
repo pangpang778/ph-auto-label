@@ -46,7 +46,10 @@ jobs:
     name: OpenCodeReview
     needs: lint-and-test
     # Enable only after the repository LLM credentials have been configured.
-    if: github.event_name == 'pull_request' && vars.OCR_REVIEW_ENABLED == 'true'
+    if: >-
+      github.event_name == 'pull_request' &&
+      vars.OCR_REVIEW_ENABLED == 'true' &&
+      !contains(github.event.pull_request.labels.*.name, 'trusted-ai-provider')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
