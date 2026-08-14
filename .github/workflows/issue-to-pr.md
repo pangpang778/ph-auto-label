@@ -10,14 +10,20 @@ permissions:
   issues: read
   pull-requests: read
 
-model: gpt-5.4
+model: ${{ vars.GH_AW_LLM_MODEL }}
 engine:
-  id: codex
+  id: claude
+  env:
+    ANTHROPIC_BASE_URL: https://ark.cn-beijing.volces.com/api/coding
+    ANTHROPIC_API_KEY: ${{ secrets.GH_AW_ANTHROPIC_API_KEY }}
 tools:
   github:
     toolsets: [repos, issues, pull_requests]
 
-network: defaults
+network:
+  allowed:
+    - defaults
+    - ark.cn-beijing.volces.com
 
 safe-outputs:
   add-comment:
@@ -32,7 +38,6 @@ safe-outputs:
     draft: true
     fallback-as-issue: false
     protected-files: fallback-to-issue
-    github-token: ${{ secrets.GH_AW_GITHUB_TOKEN }}
 ---
 
 # Issue To Draft PR
