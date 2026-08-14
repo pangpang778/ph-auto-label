@@ -11,6 +11,10 @@ permissions:
   pull-requests: read
 
 model: ${{ vars.GH_AW_LLM_MODEL }}
+models:
+  default-ai-credits-pricing:
+    input: 0.000001
+    output: 0.000001
 engine:
   id: claude
   env:
