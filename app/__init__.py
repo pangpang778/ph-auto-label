@@ -127,7 +127,11 @@ def create_app():
     @app.get("/api/health")
     def health_check():
         """Lightweight liveness probe that does not depend on model services."""
-        return jsonify({"status": "ok"})
+        response = jsonify({"status": "ok"})
+        # Intermediaries and browsers must not cache liveness responses, or a
+        # cached success could hide a service state change.
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     # Deferred imports avoid any module-load cycles.
     from app.blueprints.annotation import bp as annotation_bp
