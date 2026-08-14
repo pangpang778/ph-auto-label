@@ -11,6 +11,8 @@ permissions:
   pull-requests: read
 
 model: ${{ vars.GH_AW_LLM_MODEL }}
+timeout-minutes: 45
+max-turns: 20
 models:
   default-ai-credits-pricing:
     input: 0.000001
@@ -83,6 +85,10 @@ Implementation requirements:
 6. Create exactly one draft PR when verification succeeds. Its body must link
    the issue, list changed behavior, list verification commands and results,
    and call out remaining risks. Do not merge the PR.
+7. Reuse the repository's existing runtime and dependency setup. Do not create
+   virtual environments, probe alternate language runtimes, upgrade tooling,
+   or install unrelated packages; use the issue's verification commands as
+   written and let CI own dependency installation.
 
 Never include credentials, secret values, private endpoints, or model settings
 in commits, PR bodies, issue comments, logs, or agent output.
