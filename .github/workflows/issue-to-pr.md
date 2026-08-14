@@ -22,14 +22,44 @@ engine:
   env:
     ANTHROPIC_BASE_URL: https://ark.cn-beijing.volces.com/api/coding
     ANTHROPIC_API_KEY: ${{ secrets.GH_AW_ANTHROPIC_API_KEY }}
+    PYTHONPATH: /tmp/gh-aw/agent-python
 tools:
   github:
     toolsets: [repos, issues, pull_requests]
 
+runtimes:
+  python:
+    version: "3.12"
+
 network:
   allowed:
     - defaults
+    - python
     - ark.cn-beijing.volces.com
+
+steps:
+  - name: Prepare focused Python test environment
+    shell: bash
+    run: |
+      set -euo pipefail
+      agent_python="/tmp/gh-aw/agent-python"
+      rm -rf "$agent_python"
+      mkdir -p "$agent_python"
+      python -m pip install \
+        --disable-pip-version-check \
+        --no-cache-dir \
+        --target "$agent_python" \
+        "Flask>=3.1.0" \
+        "flask-cors>=6.0.0" \
+        "opencv-python>=4.10.0" \
+        "pillow>=10.0.0" \
+        "numpy>=2.0.0" \
+        "psutil>=5.9.0" \
+        "requests>=2.28.0" \
+        "filelock>=3.13.0" \
+        "PyYAML>=6.0" \
+        pytest \
+        ruff
 
 safe-outputs:
   add-comment:
@@ -85,10 +115,11 @@ Implementation requirements:
 6. Create exactly one draft PR when verification succeeds. Its body must link
    the issue, list changed behavior, list verification commands and results,
    and call out remaining risks. Do not merge the PR.
-7. Reuse the repository's existing runtime and dependency setup. Do not create
-   virtual environments, probe alternate language runtimes, upgrade tooling,
-   or install unrelated packages; use the issue's verification commands as
-   written and let CI own dependency installation.
+7. Reuse the deterministic Python test environment prepared by the workflow.
+   Do not create virtual environments, probe alternate language runtimes,
+   upgrade tooling, install packages, or run the full application dependency
+   set. Use the issue's verification commands as written; if `ruff` or
+   `pytest` is not on PATH, invoke it as `python -m ruff` or `python -m pytest`.
 
 Never include credentials, secret values, private endpoints, or model settings
 in commits, PR bodies, issue comments, logs, or agent output.
