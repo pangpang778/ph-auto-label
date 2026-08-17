@@ -1,9 +1,9 @@
 """Small stateless helpers shared across domains."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec='seconds') + "Z"
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def color_for_index(index):
