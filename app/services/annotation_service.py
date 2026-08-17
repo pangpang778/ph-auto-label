@@ -274,7 +274,7 @@ def save_image_annotations(image_name, data):
                 shutil.copy2(PATHS['annotations'], PATHS['annotations'] + '.bak')
                 metrics['backup_ms'] = int((time.perf_counter() - backup_started) * 1000)
             except Exception as e:
-                print(f"备份失败: {e}")
+                logger.warning('[annotations.save.backup_failed] image=%s error=%s', image_name, e)
 
         current[image_name] = data
         return current, None
@@ -294,7 +294,7 @@ def save_image_annotations(image_name, data):
         raise AnnotationError(503, '文件正在被其他操作使用，请稍后重试')
     except (OSError, ValueError) as e:
         metrics['total_ms'] = int((time.perf_counter() - req_started) * 1000)
-        print(f"保存标注文件失败: {e}")
+        logger.error('[annotations.save.failed] image=%s error=%s', image_name, e)
         raise AnnotationError(500, f'保存失败: {str(e)}')
 
     metrics['lock_wait_ms'] = int((time.perf_counter() - lock_wait_started) * 1000)
