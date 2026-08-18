@@ -6,3 +6,4 @@ def test_health_endpoint_returns_ok_without_model_initialization(isolated_app):
 
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok"}
+    assert response.headers.get("Cache-Control") == "no-store"
