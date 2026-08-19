@@ -23,14 +23,17 @@ import app as training_app
 # ---------------------------------------------------------------------------
 
 def _patch_video_externals(monkeypatch, job_id="job-xyz"):
-    """Patch video_inference_service + resolve_video_path on app's reference.
+    """Patch the video-inference deep-module boundaries on app's reference.
 
-    Mocks return deterministic, contract-shaped values so the real handlers
-    can be exercised without a real video file or inference backend.
+    The facade validation (param parsing, path resolution, engine dispatch)
+    runs for real; only the externals are mocked: path resolution, job launch,
+    and SAM3 load state. Mocks return deterministic, contract-shaped values so
+    the real handlers can be exercised without a real video file or inference
+    backend.
     """
     monkeypatch.setattr(
         training_app.video_inference_service,
-        "start_job",
+        "_launch_job",
         lambda *a, **k: {"id": job_id, "status": "running"},
     )
     monkeypatch.setattr(
@@ -45,7 +48,8 @@ def _patch_video_externals(monkeypatch, job_id="job-xyz"):
     )
     # Only "fake.mp4" resolves; any other name is treated as unknown (None).
     monkeypatch.setattr(
-        "app.blueprints.video_test.resolve_video_path",
+        training_app.video_inference_service,
+        "resolve_video",
         lambda name: "/tmp/fake.mp4" if name == "fake.mp4" else None,
     )
 

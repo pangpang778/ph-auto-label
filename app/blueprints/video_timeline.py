@@ -16,7 +16,6 @@ from app.services.video_timeline_service import (
     read_scenario,
     update_scenario,
 )
-from plugins.video_inference import list_available_videos, resolve_video_path
 
 bp = Blueprint("video_timeline", __name__)
 

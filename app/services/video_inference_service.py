@@ -10,11 +10,12 @@ ffprobe 取信息 -> ffmpeg 解码 -> 按 target_fps 抽帧 -> 逐帧推理(YOLO
 - YOLO 在主进程 lazy-load 并缓存（逐帧推理，子进程开销不可接受）。
 - SAM3 复用 sam3_service 单例（GPU），通过其 public detect_frame 方法。
 - job 状态存在内存 dict，SSE generator 周期性读取推送进度。
+- 本模块是视频推理管线的唯一 owner：素材/输出目录来自共享 PATHS 注册表（构造器可注入覆盖，
+  供测试重定向），blueprint 只经 service 接口调用。
 """
 
 import json
 import logging
-import math
 import os
 import subprocess
 import threading
@@ -25,15 +26,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from app.common.config import PATHS, VIDEO_EXTENSIONS
+
 logger = logging.getLogger("video-inference")
-
-# 视频素材目录
-UPLOAD_VIDEO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", "video_compare")
-STATIC_VIDEO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "video_compare")
-os.makedirs(UPLOAD_VIDEO_DIR, exist_ok=True)
-os.makedirs(STATIC_VIDEO_DIR, exist_ok=True)
-
-VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
 
 # 类别配色（与 app.py color_for_index 风格一致）
 _PALETTE = [
@@ -121,10 +116,85 @@ def _drain_stderr(proc: subprocess.Popen, sink: Optional[List[str]] = None) -> t
     return t
 
 
-class VideoInferenceService:
-    """视频推理服务单例：管理 job 状态 + 后台推理线程。"""
+def _sse(payload: Dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    def __init__(self) -> None:
+
+def _is_within(base: str, name: str) -> Optional[str]:
+    """Resolve ``name`` under ``base`` and return the real path if it stays
+    inside, else ``None``.
+
+    Rejects traversal (``..``), absolute paths, and any resolve that escapes
+    ``base``. This guards the path fed to ffmpeg/YOLO so a ``<path:name>`` route
+    cannot read arbitrary files. ponytail: local impl; consolidating into
+    app.common.path_safety is a separate refactor.
+    """
+    if not name or not isinstance(name, str):
+        return None
+    if os.path.isabs(name) or '..' in name.replace('\\', '/').split('/'):
+        return None
+    base_real = os.path.realpath(base)
+    child = os.path.realpath(os.path.join(base_real, name))
+    try:
+        base_nc = os.path.normcase(base_real)
+        if os.path.commonpath([base_nc, os.path.normcase(child)]) != base_nc:
+            return None
+    except ValueError:
+        # Different drives (Windows) -> incomparable, treat as outside.
+        return None
+    if not os.path.isfile(child):
+        return None
+    return child
+
+
+class VideoTestError(Exception):
+    """视频测试请求错误；携带应返回给客户端的 HTTP 状态。"""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _parse_classes(raw: Any) -> List[str]:
+    """把 SAM3 目标类别从 list/str 解析成干净的字符串列表。"""
+    if isinstance(raw, list):
+        return [str(c).strip() for c in raw if str(c).strip()]
+    if isinstance(raw, str):
+        s = raw.replace('，', ',').replace('\n', ',').replace(';', ',')
+        return [c.strip() for c in s.split(',') if c.strip()]
+    return []
+
+
+def _parse_params(data: Dict[str, Any]) -> Tuple[str, str, int, float]:
+    """解析并校验视频测试请求参数。参数非法时抛 ValueError。"""
+    name = (data.get('video_name') or '').strip()
+    engine = (data.get('engine') or 'yolo').strip().lower()
+    try:
+        target_fps = int(data.get('target_fps', 2))
+    except (TypeError, ValueError):
+        target_fps = 2
+    try:
+        conf = float(data.get('confidence', 0.35))
+    except (TypeError, ValueError):
+        conf = 0.35
+    if engine not in ('yolo', 'sam3'):
+        raise ValueError('引擎必须是 yolo 或 sam3')
+    if target_fps not in (1, 2, 5):
+        raise ValueError('帧率仅支持 1/2/5')
+    return name, engine, target_fps, conf
+
+
+class VideoInferenceService:
+    """视频推理服务：管理 job 状态 + 后台推理线程 + MJPEG 流会话。
+
+    素材与输出目录取共享 PATHS 注册表（call-time），也可用构造参数注入覆盖，
+    便于测试重定向到临时目录而不写真实路径。
+    """
+
+    def __init__(self, upload_video_dir: Optional[str] = None, static_video_dir: Optional[str] = None) -> None:
+        self._upload_override = upload_video_dir
+        self._static_override = static_video_dir
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         # YOLO 模型缓存 {model_path: YOLO}
@@ -133,8 +203,75 @@ class VideoInferenceService:
         # 流式 MJPEG 会话 {session_id: {...}}
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
+    def _upload_dir(self) -> str:
+        return self._upload_override or PATHS["video_uploads"]
+
+    def _static_dir(self) -> str:
+        return self._static_override or PATHS["video_static"]
+
+    # ---------- blueprint 单一接口（facade） ----------
+    def start_job(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Facade：接收原始请求 dict，校验后启动离线推理任务。"""
+        return self._dispatch(data, self._launch_job)
+
+    def start_stream_session(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Facade：接收原始请求 dict，校验后启动 MJPEG 流会话。"""
+        return self._dispatch(data, self._launch_stream)
+
+    def _dispatch(self, data: Dict[str, Any], launcher: Callable[..., Dict[str, Any]]) -> Dict[str, Any]:
+        try:
+            name, engine, target_fps, conf = _parse_params(data)
+        except ValueError as exc:
+            raise VideoTestError(400, str(exc)) from exc
+        path = self.resolve_video(name)
+        if not path:
+            raise VideoTestError(400, f"视频不存在: {name}")
+        if engine == "sam3":
+            if not self.sam3_loaded():
+                raise VideoTestError(503, "SAM3 模型未加载，请先确认模型已就绪")
+            classes = _parse_classes(data.get("classes"))
+            if not classes:
+                raise VideoTestError(400, "SAM3 需要填写目标类别(text)，如 person,car")
+            return launcher(path, "sam3", classes=classes, target_fps=target_fps, conf=conf)
+        model_path = data.get("model") or "yolo11n.pt"
+        return launcher(path, "yolo", model_path=model_path, target_fps=target_fps, conf=conf)
+
+    def sam3_loaded(self) -> bool:
+        from plugins.sam3_service import sam3_service
+        return sam3_service.is_loaded
+
+    def list_videos(self) -> List[Dict[str, Any]]:
+        """列出可选视频：static/video_compare（默认素材）+ uploads/video_compare（上传）。"""
+        seen = {}
+
+        def _scan(directory: str, source: str, skip_ai: bool) -> None:
+            try:
+                names = sorted(os.listdir(directory))
+            except OSError:
+                return
+            for fn in names:
+                if fn.lower().endswith(VIDEO_EXTENSIONS) and not (skip_ai and fn.startswith("ai_")):
+                    try:
+                        size = os.path.getsize(os.path.join(directory, fn))
+                    except OSError:
+                        continue
+                    seen[fn] = {"name": fn, "source": source,
+                                "url": f"/api/video-test/video/{fn}", "size": size}
+
+        _scan(self._static_dir(), "default", skip_ai=True)
+        _scan(self._upload_dir(), "upload", skip_ai=False)
+        return list(seen.values())
+
+    def resolve_video(self, name: str) -> Optional[str]:
+        """按文件名在两个目录里找视频。拒绝越界路径（../、绝对路径）。"""
+        for d in (self._upload_dir(), self._static_dir()):
+            p = _is_within(d, name)
+            if p:
+                return p
+        return None
+
     # ---------- job 管理 ----------
-    def start_job(
+    def _launch_job(
         self,
         video_path: str,
         engine: str,
@@ -233,7 +370,7 @@ class VideoInferenceService:
             self._set(job_id, total_frames=est_frames, message=f"开始推理 {info['width']}x{info['height']} {src_fps}fps, 全帧推理 {est_frames or '?'} 帧")
 
             out_name = f"ai_{job_id}.mp4"
-            out_path = os.path.join(STATIC_VIDEO_DIR, out_name)
+            out_path = os.path.join(self._static_dir(), out_name)
 
             engine = job["engine"]
             yolo_model = None
@@ -395,7 +532,7 @@ class VideoInferenceService:
         return frame
 
     # ---------- 流式 MJPEG 边算边播 ----------
-    def start_stream_session(
+    def _launch_stream(
         self,
         video_path: str,
         engine: str,
@@ -542,67 +679,5 @@ class VideoInferenceService:
                     self._jobs.pop(jid, None)
 
 
-def _sse(payload: Dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
 # 全局单例
 video_inference_service = VideoInferenceService()
-
-
-def list_available_videos() -> List[Dict[str, Any]]:
-    """列出可选视频：static/video_compare（默认素材）+ uploads/video_compare（上传）。"""
-    seen = {}
-
-    def _scan(directory: str, source: str, skip_ai: bool) -> None:
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            return
-        for fn in names:
-            if fn.lower().endswith(VIDEO_EXT) and not (skip_ai and fn.startswith("ai_")):
-                try:
-                    size = os.path.getsize(os.path.join(directory, fn))
-                except OSError:
-                    continue
-                seen[fn] = {"name": fn, "source": source,
-                            "url": f"/api/video-test/video/{fn}", "size": size}
-
-    _scan(STATIC_VIDEO_DIR, "default", skip_ai=True)
-    _scan(UPLOAD_VIDEO_DIR, "upload", skip_ai=False)
-    return list(seen.values())
-
-
-def _is_within(base: str, name: str) -> Optional[str]:
-    """Resolve ``name`` under ``base`` and return the real path if it stays
-    inside, else ``None``.
-
-    Rejects traversal (``..``), absolute paths, and any resolve that escapes
-    ``base``. This guards the path fed to ffmpeg/YOLO so a ``<path:name>`` route
-    cannot read arbitrary files. Local impl (plugins must not depend on app.common).
-    """
-    if not name or not isinstance(name, str):
-        return None
-    if os.path.isabs(name) or '..' in name.replace('\\', '/').split('/'):
-        return None
-    base_real = os.path.realpath(base)
-    child = os.path.realpath(os.path.join(base_real, name))
-    try:
-        base_nc = os.path.normcase(base_real)
-        if os.path.commonpath([base_nc, os.path.normcase(child)]) != base_nc:
-            return None
-    except ValueError:
-        # Different drives (Windows) -> incomparable, treat as outside.
-        return None
-    if not os.path.isfile(child):
-        return None
-    return child
-
-
-def resolve_video_path(name: str) -> Optional[str]:
-    """按文件名在两个目录里找视频。拒绝越界路径（../、绝对路径）。"""
-    for d in (UPLOAD_VIDEO_DIR, STATIC_VIDEO_DIR):
-        p = _is_within(d, name)
-        if p:
-            return p
-    return None
