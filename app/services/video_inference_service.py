@@ -27,6 +27,8 @@ import cv2
 import numpy as np
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
+from app.common.path_safety import PathSafetyError, resolve_contained_path
+from app.services.models_service import get_models_dir
 
 logger = logging.getLogger("video-inference")
 
@@ -233,8 +235,21 @@ class VideoInferenceService:
             if not classes:
                 raise VideoTestError(400, "SAM3 需要填写目标类别(text)，如 person,car")
             return launcher(path, "sam3", classes=classes, target_fps=target_fps, conf=conf)
-        model_path = data.get("model") or "yolo11n.pt"
+        model_path = self._validate_model_path(data.get("model"))
         return launcher(path, "yolo", model_path=model_path, target_fps=target_fps, conf=conf)
+
+    def _validate_model_path(self, raw: Any) -> str:
+        """校验 YOLO 模型路径：裸预训练名放行，其余必须落在已训练模型目录内。"""
+        name = (raw or "yolo11n.pt").strip()
+        if not name:
+            name = "yolo11n.pt"
+        # 裸名（无分隔符、非绝对路径）走 ultralytics 自身预训练查找，无遍历面
+        if not (os.path.isabs(name) or "/" in name or "\\" in name):
+            return name
+        try:
+            return resolve_contained_path(get_models_dir(), name)
+        except PathSafetyError as exc:
+            raise VideoTestError(400, str(exc)) from exc
 
     def sam3_loaded(self) -> bool:
         from plugins.sam3_service import sam3_service

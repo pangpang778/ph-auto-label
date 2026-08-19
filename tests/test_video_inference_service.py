@@ -52,13 +52,39 @@ def _make_service(tmp_path):
     return VideoInferenceService(upload_video_dir=str(upload), static_video_dir=str(static))
 
 
-def test_facade_yolo_launches_with_model_path(tmp_path, monkeypatch):
+def test_facade_yolo_launches_with_pretrained_name(tmp_path, monkeypatch):
     svc = _make_service(tmp_path)
     monkeypatch.setattr(svc, "_launch_job", lambda *a, **k: {**k, "engine": a[1], "path": a[0]})
-    result = svc.start_job({"video_name": "a.mp4", "engine": "yolo", "model": "/m/y.pt"})
+    result = svc.start_job({"video_name": "a.mp4", "engine": "yolo", "model": "yolo11n.pt"})
     assert result["engine"] == "yolo"
-    assert result["model_path"] == "/m/y.pt"
+    assert result["model_path"] == "yolo11n.pt"
     assert result["path"].endswith("a.mp4")
+
+
+def test_facade_yolo_accepts_model_under_models_dir(tmp_path, monkeypatch):
+    from app.common.config import PATHS
+
+    monkeypatch.setitem(PATHS, "plugins_yolo11", str(tmp_path))
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True)
+    (models_dir / "trained.pt").write_bytes(b"x")
+    svc = _make_service(tmp_path)
+    monkeypatch.setattr(svc, "_launch_job", lambda *a, **k: k)
+    result = svc.start_job(
+        {"video_name": "a.mp4", "engine": "yolo", "model": str(models_dir / "trained.pt")}
+    )
+    assert result["model_path"].endswith("trained.pt")
+
+
+@pytest.mark.parametrize("evil", ["../../../etc/passwd", "C:\\Windows\\system32\\x.pt"])
+def test_facade_yolo_rejects_out_of_dir_model_path(tmp_path, monkeypatch, evil):
+    from app.common.config import PATHS
+
+    monkeypatch.setitem(PATHS, "plugins_yolo11", str(tmp_path / "yolo11"))
+    svc = _make_service(tmp_path)
+    with pytest.raises(VideoTestError) as ei:
+        svc.start_job({"video_name": "a.mp4", "engine": "yolo", "model": evil})
+    assert ei.value.status == 400
 
 
 def test_facade_sam3_launches_with_parsed_classes(tmp_path, monkeypatch):
