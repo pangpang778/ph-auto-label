@@ -2,7 +2,7 @@
 
 Owns model-versioning logic AND re-exports the model-registry repository's
 public API. Cross-domain callers (training_service, annotation_service,
-video_test_service) MUST go through THIS module - never
+video_test blueprint) MUST go through THIS module - never
 app.repositories.model_registry_repo directly (closed-world contract,
 Interpretation A - see .omc/plans/api-freeze.md §2).
 """

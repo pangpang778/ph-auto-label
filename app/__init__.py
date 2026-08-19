@@ -26,8 +26,8 @@ from app.services.training_service import (
     build_yolo_training_dataset,
     normalize_split_config,
 )
+from app.services.video_inference_service import video_inference_service
 from plugins.sam3_service import sam3_service
-from plugins.video_inference import video_inference_service
 
 __all__ = [
     "create_app", "PATHS", "VIDEO_EXTENSIONS",
@@ -69,6 +69,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _ensure_dirs():
     os.makedirs(PATHS["uploads"], exist_ok=True)
     os.makedirs(os.path.dirname(PATHS["annotations"]), exist_ok=True)
+    os.makedirs(PATHS["video_uploads"], exist_ok=True)
+    os.makedirs(PATHS["video_static"], exist_ok=True)
 
 
 def _init_data_files():

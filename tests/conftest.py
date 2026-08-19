@@ -26,7 +26,10 @@ def isolated_app(tmp_path, monkeypatch):
     yolo11_dir = tmp_path / "plugins" / "yolo11"
     models_dir = yolo11_dir / "models"
     sam3_models_file = tmp_path / "plugins" / "sam3" / "models" / "model.pt"
-    for path in (upload_dir, annotations_dir, train_work_dir, models_dir, sam3_models_file.parent):
+    video_uploads_dir = tmp_path / "uploads" / "video_compare"
+    video_static_dir = tmp_path / "static" / "video_compare"
+    for path in (upload_dir, annotations_dir, train_work_dir, models_dir, sam3_models_file.parent,
+                 video_uploads_dir, video_static_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     files = {
@@ -50,6 +53,8 @@ def isolated_app(tmp_path, monkeypatch):
     monkeypatch.setitem(training_app.PATHS, "train_work", str(train_work_dir))
     monkeypatch.setitem(training_app.PATHS, "plugins_yolo11", str(yolo11_dir))
     monkeypatch.setitem(training_app.PATHS, "plugins_sam3_models", str(sam3_models_file))
+    monkeypatch.setitem(training_app.PATHS, "video_uploads", str(video_uploads_dir))
+    monkeypatch.setitem(training_app.PATHS, "video_static", str(video_static_dir))
 
     # C3: repo modules freeze their filelock paths at import time
     # (``_XXX_LOCK_PATH = PATHS[...] + '.lock'``). Redirect those constants to

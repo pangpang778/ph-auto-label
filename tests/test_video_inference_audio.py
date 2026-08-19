@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from plugins.video_inference import build_encode_command
+from app.services.video_inference_service import build_encode_command
 
 
 def test_encode_command_preserves_original_audio_track():

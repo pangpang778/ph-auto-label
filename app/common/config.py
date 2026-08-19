@@ -28,6 +28,8 @@ PATHS = {
     "train_work": os.path.join(_ROOT, "static", "train_work"),
     "plugins_yolo11": os.path.join(_ROOT, "plugins", "yolo11"),
     "plugins_sam3_models": os.path.join(_ROOT, "plugins", "sam3", "models", "model.pt"),
+    "video_uploads": os.path.join(_ROOT, "uploads", "video_compare"),
+    "video_static": os.path.join(_ROOT, "static", "video_compare"),
 }
 
 VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v')
