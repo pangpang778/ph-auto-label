@@ -25,7 +25,29 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from plugins.yolo_depth.estimator import (  # noqa: E402
+    VEHICLE_IDS,
+    VEHICLE_NAMES,
+    box_distance,
+    build_vd_label,
+    VehicleDepthEstimator,
+)
+from plugins.yolo_depth.text_cn import put_text_cn  # noqa: E402
+
 logger = logging.getLogger("video-inference")
+
+# 车辆深度跟踪引擎 — 自包含权重（随仓库提交，Q9 例外）
+_VD_WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "plugins", "yolo_depth", "weights")
+_VD_DETECT_WEIGHT = os.path.join(_VD_WEIGHTS_DIR, "yolo26n.pt")
+_VD_DEPTH_WEIGHT = os.path.join(_VD_WEIGHTS_DIR, "yolo26n-depth.pt")
+
+
+def vd_weights_ready() -> tuple[bool, str]:
+    """检测车辆深度跟踪引擎所需权重是否齐备，缺哪个给哪个名。"""
+    missing = [os.path.basename(p) for p in (_VD_DETECT_WEIGHT, _VD_DEPTH_WEIGHT) if not os.path.isfile(p)]
+    if missing:
+        return False, "车辆深度跟踪权重缺失: " + ", ".join(missing)
+    return True, ""
 
 # 视频素材目录
 UPLOAD_VIDEO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", "video_compare")
@@ -130,6 +152,10 @@ class VideoInferenceService:
         # YOLO 模型缓存 {model_path: YOLO}
         self._yolo_cache: Dict[str, Any] = {}
         self._yolo_lock = threading.Lock()
+        # 车辆深度跟踪：双模型缓存 + 各任务速度估计器
+        self._vd_models: Optional[Dict[str, Any]] = None
+        self._vd_models_lock = threading.Lock()
+        self._vd_estimators: Dict[str, VehicleDepthEstimator] = {}
         # 流式 MJPEG 会话 {session_id: {...}}
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -270,7 +296,8 @@ class VideoInferenceService:
                     frame = np.array(frame, dtype=np.uint8)  # 可写拷贝
 
                     if frame_idx % stride == 0:
-                        dets = self._infer_frame(job, frame, yolo_model)
+                        t_sec = (frame_idx / src_fps) if src_fps else 0.0
+                        dets = self._infer_frame(job, frame, yolo_model, t_sec)
                         total_dets += len(dets)
                         frame = self._draw(frame, dets)
                         processed += 1
@@ -350,15 +377,54 @@ class VideoInferenceService:
                       message=f"失败: {exc}")
 
     # ---------- 推理与绘制 ----------
-    def _infer_frame(self, job: Dict[str, Any], frame: np.ndarray, yolo_model) -> List[Dict[str, Any]]:
+    def _infer_frame(self, job: Dict[str, Any], frame: np.ndarray, yolo_model,
+                     t_sec: float = 0.0) -> List[Dict[str, Any]]:
         engine = job["engine"]
         conf = float(job["conf"])
+        if engine == "vehicle-depth":
+            return self._infer_vd(job, frame, conf, t_sec)
         if engine == "yolo":
             return self._infer_yolo(yolo_model, frame, conf)
         elif engine == "sam3":
             from plugins.sam3_service import sam3_service
             return sam3_service.detect_frame(frame, text=job["classes"], conf=conf)
         raise ValueError(f"未知引擎: {engine}")
+
+    def _infer_vd(self, job: Dict[str, Any], frame: np.ndarray, conf: float,
+                  t_sec: float) -> List[Dict[str, Any]]:
+        """车辆深度跟踪：detect+track 出稳定 ID → 单目深度测距 → Δd/Δt 测速。"""
+        vd = self._get_vd_models()
+        est = self._vd_estimators.setdefault(job["id"], VehicleDepthEstimator())
+
+        tracks = vd["detect"].track(
+            frame, persist=True, classes=list(VEHICLE_IDS), conf=conf, verbose=False,
+        )[0]
+        depth_m = vd["depth"](frame, verbose=False)[0].depth.data.cpu().numpy()
+        if depth_m.shape[:2] != frame.shape[:2]:
+            depth_m = cv2.resize(depth_m, (frame.shape[1], frame.shape[0]),
+                                 interpolation=cv2.INTER_LINEAR)
+
+        out: List[Dict[str, Any]] = []
+        boxes = tracks.boxes
+        if boxes is not None and len(boxes):
+            xyxy = boxes.xyxy.cpu().numpy()
+            cls = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None \
+                else np.zeros(len(xyxy), dtype=int)
+            ids = boxes.id
+            ids = ids.cpu().numpy().astype(int) if ids is not None else np.arange(len(xyxy))
+            for box, c, tid in zip(xyxy, cls, ids):
+                dist = box_distance(depth_m, box)
+                dist_s, speed_kmh, direction = est.update(int(tid), t_sec, dist)
+                name = VEHICLE_NAMES.get(int(c), str(int(c)))
+                label = build_vd_label(int(tid), name, dist_s, speed_kmh, direction)
+                out.append({
+                    "class": name,
+                    "conf": conf,
+                    "xyxy": [float(v) for v in box],
+                    "vd_label": label,
+                    "vd_color": _color_for_class(f"id{int(tid)}"),
+                })
+        return out
 
     def _infer_yolo(self, model, frame: np.ndarray, conf: float) -> List[Dict[str, Any]]:
         results = model(frame, conf=conf, verbose=False)
@@ -384,6 +450,13 @@ class VideoInferenceService:
     def _draw(self, frame: np.ndarray, dets: List[Dict[str, Any]]) -> np.ndarray:
         for d in dets:
             x1, y1, x2, y2 = (int(v) for v in d["xyxy"])
+            vd_label = d.get("vd_label")
+            if vd_label is not None:
+                color = tuple(int(c) for c in d.get("vd_color", (0, 200, 255)))
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                put_text_cn(frame, vd_label, (x1, max(0, y1 - 22 - 12)),
+                            font_size=22, color=color, bg=(0, 0, 0))
+                continue
             color = _color_for_class(d["class"])
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             label = f"{d['class']} {d['conf']:.2f}"
@@ -528,11 +601,29 @@ class VideoInferenceService:
                 self._yolo_cache[path] = YOLO(path)
             return self._yolo_cache[path]
 
+    def _get_vd_models(self) -> Dict[str, Any]:
+        """懒加载车辆深度跟踪的检测+深度双模型并缓存。权重缺失时抛可读错误。"""
+        with self._vd_models_lock:
+            if self._vd_models is None:
+                ok, err = vd_weights_ready()
+                if not ok:
+                    raise RuntimeError(err)
+                from ultralytics import YOLO
+                logger.info(f"loading vehicle-depth models: {_VD_DETECT_WEIGHT} + {_VD_DEPTH_WEIGHT}")
+                self._vd_models = {
+                    "detect": YOLO(_VD_DETECT_WEIGHT),
+                    "depth": YOLO(_VD_DEPTH_WEIGHT),
+                }
+            return self._vd_models
+
     # ---------- 内部 ----------
     def _set(self, job_id: str, **fields) -> None:
         with self._lock:
             if job_id in self._jobs:
                 self._jobs[job_id].update(fields)
+            # 终态任务清理其速度估计器，避免内存无限增长
+            if fields.get("status") in ("completed", "failed"):
+                self._vd_estimators.pop(job_id, None)
             # 终态任务超过上限时，淘汰最旧的已完成/失败任务，避免内存无限增长
             if fields.get("status") in ("completed", "failed") and len(self._jobs) > 100:
                 term = [(jid, j) for jid, j in self._jobs.items()

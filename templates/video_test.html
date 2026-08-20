@@ -39,6 +39,7 @@
                     <div class="vt-engine">
                         <label class="vt-radio"><input type="radio" name="engine" value="yolo" checked> YOLO</label>
                         <label class="vt-radio"><input type="radio" name="engine" value="sam3"> SAM3</label>
+                        <label class="vt-radio"><input type="radio" name="engine" value="vehicle-depth"> 车辆深度跟踪</label>
                     </div>
 
                     <div id="yoloPanel" class="vt-subpanel">
@@ -49,6 +50,10 @@
                     <div id="sam3Panel" class="vt-subpanel" style="display:none;">
                         <label class="vt-label">SAM3 目标类别</label>
                         <input type="text" id="sam3Classes" class="vt-input" placeholder="person,car,dog" value="person,car">
+                    </div>
+
+                    <div id="vdPanel" class="vt-subpanel" style="display:none;">
+                        <span class="vt-hint">自动检测 car/bus/truck/moto，输出稳定 ID · 距离(m) · 接近/远离速度。权重随仓库内置。</span>
                     </div>
                 </div>
 

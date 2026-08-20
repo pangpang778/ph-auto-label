@@ -146,6 +146,46 @@ def test_video_test_start_rejects_unknown_video_with_400(isolated_app, monkeypat
 
 
 @pytest.mark.integration
+def test_video_test_start_vehicle_depth_returns_job_id(isolated_app, monkeypatch):
+    # Arrange
+    _patch_video_externals(monkeypatch)
+    client = isolated_app.test_client()
+
+    # Act
+    response = client.post(
+        "/api/video-test/start",
+        json={"engine": "vehicle-depth", "target_fps": 2, "video_name": "fake.mp4"},
+    )
+
+    # Assert — engine accepted, job dispatched to the mocked launcher
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["job_id"] == "job-xyz"
+    assert body["status"] == "running"
+
+
+@pytest.mark.integration
+def test_video_test_start_vehicle_depth_missing_weights_surfaces_503(isolated_app, monkeypatch):
+    # Arrange — force the weight check to fail; patch the blueprint's bound ref
+    _patch_video_externals(monkeypatch)
+    monkeypatch.setattr(
+        "app.blueprints.video_test.vd_weights_ready",
+        lambda: (False, "车辆深度跟踪权重缺失: yolo26n-depth.pt"),
+    )
+    client = isolated_app.test_client()
+
+    # Act
+    response = client.post(
+        "/api/video-test/start",
+        json={"engine": "vehicle-depth", "target_fps": 2, "video_name": "fake.mp4"},
+    )
+
+    # Assert — missing weights -> 503 with a clear message
+    assert response.status_code == 503
+    assert "权重缺失" in response.get_json()["error"]
+
+
+@pytest.mark.integration
 def test_video_test_start_sam3_requires_loaded_model_and_classes(isolated_app, monkeypatch):
     # Arrange — SAM3 path: model not loaded -> 503; loaded but no classes -> 400.
     # is_loaded is a read-only property backed by _loaded; patch the backing attr.

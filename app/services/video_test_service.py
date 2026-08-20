@@ -33,8 +33,8 @@ def parse_video_test_params(data):
         conf = float(data.get('confidence', 0.35))
     except (TypeError, ValueError):
         conf = 0.35
-    if engine not in ('yolo', 'sam3'):
-        raise ValueError('引擎必须是 yolo 或 sam3')
+    if engine not in ('yolo', 'sam3', 'vehicle-depth'):
+        raise ValueError('引擎必须是 yolo、sam3 或 vehicle-depth')
     if target_fps not in (1, 2, 5):
         raise ValueError('帧率仅支持 1/2/5')
     return name, engine, target_fps, conf

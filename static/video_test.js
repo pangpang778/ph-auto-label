@@ -14,6 +14,7 @@
         uploadMsg: $('uploadMsg'),
         yoloPanel: $('yoloPanel'),
         sam3Panel: $('sam3Panel'),
+        vdPanel: $('vdPanel'),
         yoloModel: $('yoloModel'),
         sam3Classes: $('sam3Classes'),
         confRange: $('confRange'),
@@ -157,6 +158,7 @@
         const engine = document.querySelector('input[name="engine"]:checked').value;
         els.yoloPanel.style.display = engine === 'yolo' ? '' : 'none';
         els.sam3Panel.style.display = engine === 'sam3' ? '' : 'none';
+        els.vdPanel.style.display = engine === 'vehicle-depth' ? '' : 'none';
     }
 
     document.querySelectorAll('input[name="engine"]').forEach((radio) => radio.addEventListener('change', updateEnginePanel));
@@ -180,10 +182,11 @@
         const body = { video_name: videoName, engine, confidence: parseFloat(els.confRange.value) };
         if (engine === 'yolo') {
             body.model = els.yoloModel.value || 'yolo11n.pt';
-        } else {
+        } else if (engine === 'sam3') {
             body.classes = els.sam3Classes.value;
             if (!body.classes.trim()) { alert('请填写 SAM3 目标类别'); return; }
         }
+        // engine === 'vehicle-depth': 引擎自包含权重与类别，无需额外参数
 
         els.startBtn.disabled = true;
         els.statusArea.style.display = '';

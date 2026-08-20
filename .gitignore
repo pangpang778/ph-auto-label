@@ -159,3 +159,5 @@ static/video_compare/ai_*.jpg
 # 模型权重（体积大，运行时下载/放置，参见 README §2.4 / §5.5）
 *.pt
 plugins/sam3/models/
+# 例外：车辆深度跟踪引擎的两个权重随仓库提交（Q9 决策，见 README 车辆深度跟踪章节）
+!plugins/yolo_depth/weights/*.pt

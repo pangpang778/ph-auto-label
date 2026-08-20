@@ -9,7 +9,7 @@ from app.common.config import PATHS, VIDEO_EXTENSIONS
 from app.services.models_service import list_installed_models as models_service_list_installed_models
 from app.services.video_test_service import _parse_classes, get_active_model, get_models_dir, parse_video_test_params
 from plugins.sam3_service import sam3_service
-from plugins.video_inference import UPLOAD_VIDEO_DIR, list_available_videos, resolve_video_path, video_inference_service
+from plugins.video_inference import UPLOAD_VIDEO_DIR, list_available_videos, resolve_video_path, vd_weights_ready, video_inference_service
 
 bp = Blueprint("video_test", __name__)
 
@@ -94,6 +94,12 @@ def _dispatch_video_test(data, launcher):
         if not classes:
             return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
         return launcher(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
+
+    if engine == 'vehicle-depth':
+        ok, err = vd_weights_ready()
+        if not ok:
+            return jsonify({'error': err}), 503
+        return launcher(path, 'vehicle-depth', target_fps=target_fps, conf=conf)
 
     model_path = data.get('model') or 'yolo11n.pt'
     return launcher(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
