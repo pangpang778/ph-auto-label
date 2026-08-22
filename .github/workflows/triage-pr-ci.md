@@ -29,9 +29,17 @@ permissions:
 concurrency:
   group: "triage-target-${{ github.repository }}-pull_request-${{ github.event.workflow_run.pull_requests[0].number || github.event.pull_request.number || github.run_id }}"
   cancel-in-progress: false
-checkout: false
+checkout:
+  ref: ${{ github.event.pull_request.base.sha }}
+  sparse-checkout: |
+    .github
+    .agents
+    .claude
+    .codex
+    .gemini
+    .pi
 model: ${{ vars.GH_AW_LLM_MODEL }}
-timeout-minutes: 15
+timeout-minutes: 30
 max-turns: 8
 max-ai-credits: 500
 max-daily-ai-credits: 3000
@@ -174,6 +182,7 @@ trusted values exactly in the safe output:
 - CI run ID: `${{ needs.ci-evidence.outputs.ci_run_id }}`
 
 Use event key `pr:<number>:sha:<head_sha>`. Read the PR description, linked Issue, comments, diff
-metadata, and the completed CI checks through read-only GitHub tools. Never checkout, download, import,
-or execute PR-controlled files or artifacts. For a fork PR, this workflow is running from the base
-repository context and the same restriction is absolute.
+metadata, and the completed CI checks through read-only GitHub tools. The only local checkout is the
+explicitly configured trusted base ref; never checkout, download, import, or execute PR-controlled
+files or artifacts. For a fork PR, this workflow is running from the base repository context and the
+same restriction is absolute.

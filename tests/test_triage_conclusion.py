@@ -4,7 +4,6 @@ import pytest
 
 from scripts.triage_conclusion import (
     AI_DISCLAIMER,
-    GitHubNotFound,
     TriageError,
     already_processed,
     apply_decision,
@@ -15,6 +14,7 @@ from scripts.triage_conclusion import (
     load_agent_decision,
     parse_decision,
     run,
+    Target,
     validate_transition,
 )
 
@@ -35,22 +35,12 @@ class FakeClient:
     def list_comments(self, number):
         return self.comments
 
-    def remove_label(self, number, label):
-        self.operations.append(("remove", label))
-
-    def add_label(self, number, label):
-        self.operations.append(("add", label))
+    def replace_labels(self, number, labels):
+        self.operations.append(("labels", tuple(sorted(labels))))
 
     def add_comment(self, number, body):
         self.operations.append(("comment", body))
         self.comments.append({"body": body})
-
-
-class MissingLabelClient(FakeClient):
-    def remove_label(self, number, label):
-        self.operations.append(("remove", label))
-        raise GitHubNotFound("label was already removed")
-
 
 def valid_item(**overrides):
     item = {
@@ -119,14 +109,14 @@ def test_derive_event_keys():
 
 def test_fallback_preserves_one_existing_category():
     item = {"labels": [{"name": "bug"}, {"name": "customer"}]}
-    target = type("Target", (), {"target_type": "issue", "number": 7, "event_key": "comment:99:created", "head_sha": ""})()
+    target = Target("issue", 7, "comment:99:created", "")
     decision = fallback_decision(target, item, "failed")
     assert decision.category == "bug"
     assert decision.state == "needs-triage"
 
 
 def test_fallback_does_not_guess_when_category_is_missing_or_conflicting():
-    target = type("Target", (), {"target_type": "issue", "number": 7, "event_key": "comment:99:created", "head_sha": ""})()
+    target = Target("issue", 7, "comment:99:created", "")
     assert fallback_decision(target, {"labels": []}, "failed").category == ""
     assert fallback_decision(target, {"labels": [{"name": "bug"}, {"name": "enhancement"}]}, "failed").category == ""
 
@@ -205,8 +195,7 @@ def test_fallback_preserves_nonmanaged_labels_and_is_idempotent():
     }
     client = FakeClient(labels=["customer"])
     assert run("issues", event, client, None) == "applied: fallback"
-    assert ("remove", "customer") not in client.operations
-    assert ("add", "needs-triage") in client.operations
+    assert ("labels", ("customer", "needs-triage")) in client.operations
     body = next(value for kind, value in client.operations if kind == "comment")
     assert body.startswith(AI_DISCLAIMER)
     assert body.endswith("Triage event: issue:7:opened:2026-08-22T00:00:00Z")
@@ -234,21 +223,7 @@ def test_successful_reevaluation_preserves_nonmanaged_labels(tmp_path):
     }
     client = FakeClient(labels=["enhancement", "needs-info", "customer"], head_sha="a" * 40)
     assert run("issue_comment", event, client, str(path)) == "applied: decision"
-    assert ("remove", "enhancement") in client.operations
-    assert ("remove", "needs-info") in client.operations
-    assert ("remove", "customer") not in client.operations
-    assert ("add", "bug") in client.operations
-    assert ("add", "ready-for-human") in client.operations
-
-
-def test_missing_managed_label_does_not_abort_application():
-    decision = parse_decision(valid_item())
-    client = MissingLabelClient(labels=["bug"])
-
-    apply_decision(client, decision, client.item)
-
-    assert ("add", "bug") in client.operations
-    assert ("add", "needs-info") in client.operations
+    assert ("labels", ("bug", "customer", "ready-for-human")) in client.operations
     assert client.operations[-1][0] == "comment"
 
 

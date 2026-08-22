@@ -12,7 +12,6 @@ import os
 import re
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,10 +36,6 @@ SHA_PATTERN = re.compile(r"^[0-9a-f]{7,64}$")
 
 class TriageError(ValueError):
     """A safe, user-facing validation failure."""
-
-
-class GitHubNotFound(TriageError):
-    """A GitHub resource disappeared before the current operation completed."""
 
 
 @dataclass(frozen=True)
@@ -94,11 +89,7 @@ class GitHubClient:
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 raw = response.read()
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise GitHubNotFound(f"GitHub resource not found: {method} {path}") from exc
-            raise TriageError(f"GitHub API request failed: {method} {path}") from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
             raise TriageError(f"GitHub API request failed: {method} {path}") from exc
         if not raw:
             return None
@@ -115,7 +106,8 @@ class GitHubClient:
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         comments: list[dict[str, Any]] = []
-        for page in range(1, 11):
+        page = 1
+        while True:
             result = self.request(
                 "GET",
                 f"/repos/{self.repository}/issues/{number}/comments?per_page=100&page={page}",
@@ -125,14 +117,14 @@ class GitHubClient:
             comments.extend(result)
             if len(result) < 100:
                 return comments
-        return comments
+            page += 1
 
-    def add_label(self, number: int, label: str) -> None:
-        self.request("POST", f"/repos/{self.repository}/issues/{number}/labels", {"labels": [label]})
-
-    def remove_label(self, number: int, label: str) -> None:
-        encoded = urllib.parse.quote(label, safe="")
-        self.request("DELETE", f"/repos/{self.repository}/issues/{number}/labels/{encoded}")
+    def replace_labels(self, number: int, labels: set[str]) -> None:
+        self.request(
+            "PUT",
+            f"/repos/{self.repository}/issues/{number}/labels",
+            {"labels": sorted(labels)},
+        )
 
     def add_comment(self, number: int, body: str) -> None:
         self.request("POST", f"/repos/{self.repository}/issues/{number}/comments", {"body": body})
@@ -370,14 +362,11 @@ def fallback_decision(target: Target, item: dict[str, Any], reason: str) -> Deci
 
 def apply_decision(client: GitHubClient, decision: Decision, item: dict[str, Any]) -> None:
     current_labels = label_names(item)
-    for label in sorted(current_labels & MANAGED_LABELS):
-        try:
-            client.remove_label(decision.target_number, label)
-        except GitHubNotFound:
-            pass
+    desired_labels = current_labels - MANAGED_LABELS
     if decision.category:
-        client.add_label(decision.target_number, decision.category)
-    client.add_label(decision.target_number, decision.state)
+        desired_labels.add(decision.category)
+    desired_labels.add(decision.state)
+    client.replace_labels(decision.target_number, desired_labels)
     client.add_comment(decision.target_number, comment_body(decision))
 
 

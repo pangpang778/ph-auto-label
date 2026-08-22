@@ -20,9 +20,17 @@ permissions:
 concurrency:
   group: "triage-target-${{ github.repository }}-${{ github.event.issue.pull_request && 'pull_request' || 'issue' }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}"
   cancel-in-progress: false
-checkout: false
+checkout:
+  ref: ${{ github.event.repository.default_branch }}
+  sparse-checkout: |
+    .github
+    .agents
+    .claude
+    .codex
+    .gemini
+    .pi
 model: ${{ vars.GH_AW_LLM_MODEL }}
-timeout-minutes: 15
+timeout-minutes: 30
 max-turns: 8
 max-ai-credits: 500
 max-daily-ai-credits: 3000

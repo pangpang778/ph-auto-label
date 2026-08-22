@@ -19,7 +19,7 @@ safe-outputs:
         and idempotency before writing one comment and managed labels.
       if: >-
         (!cancelled()) &&
-        needs.agent.result != 'skipped' &&
+        needs.agent.result == 'success' &&
         needs.detection.result == 'success' &&
         contains(needs.agent.outputs.output_types, 'apply_triage')
       runs-on: ubuntu-slim
