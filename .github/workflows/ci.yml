@@ -49,7 +49,8 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       vars.OCR_REVIEW_ENABLED == 'true' &&
-      !contains(github.event.pull_request.labels.*.name, 'trusted-ai-provider')
+      !contains(github.event.pull_request.labels.*.name, 'trusted-ai-provider') &&
+      github.event.pull_request.head.repo.id == github.repository_id
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

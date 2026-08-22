@@ -1,12 +1,12 @@
 ---
 name: Feature request
-about: Create a structured requirement for the ready-for-dev automation
+about: Submit a structured feature proposal for maintainer triage
 title: "[Feature] "
 labels: []
 assignees: []
 ---
 
-<!-- Complete every section before a maintainer adds the ready-for-dev label. -->
+<!-- Complete the sections below so triage can identify the problem and the desired outcome. -->
 
 ## Background
 
@@ -15,6 +15,14 @@ assignees: []
 ## Goal
 
 <!-- What outcome should the user receive? -->
+
+## Alternatives considered
+
+<!-- What alternatives were considered, and why are they insufficient? -->
+
+## Scope
+
+<!-- What is the smallest useful version of this change? -->
 
 ## Non-goals
 
