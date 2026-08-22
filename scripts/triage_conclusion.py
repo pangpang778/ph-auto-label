@@ -139,15 +139,35 @@ def _string(value: Any, field: str, *, required: bool = True) -> str:
     return value
 
 
+def _integer(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise TriageError(f"{field} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value)
+    raise TriageError(f"{field} must be an integer")
+
+
+def _number(value: Any, field: str) -> float:
+    if isinstance(value, bool):
+        raise TriageError(f"{field} must be numeric")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            pass
+    raise TriageError(f"{field} must be numeric")
+
+
 def parse_decision(item: dict[str, Any]) -> Decision:
     if not isinstance(item, dict):
         raise TriageError("decision is not an object")
-    try:
-        schema_version = int(item.get("schema_version"))
-        target_number = int(item.get("target_number"))
-        confidence = float(item.get("confidence"))
-    except (TypeError, ValueError) as exc:
-        raise TriageError("schema_version, target_number, or confidence is invalid") from exc
+    schema_version = _integer(item.get("schema_version"), "schema_version")
+    target_number = _integer(item.get("target_number"), "target_number")
+    confidence = _number(item.get("confidence"), "confidence")
     target_type = _string(item.get("target_type"), "target_type")
     event_key = _string(item.get("event_key"), "event_key")
     head_sha = _string(item.get("head_sha", ""), "head_sha", required=False)

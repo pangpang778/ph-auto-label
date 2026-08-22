@@ -91,6 +91,32 @@ def test_load_agent_decision_requires_exactly_one(tmp_path):
     assert load_agent_decision(str(path)).target_number == 7
     path.write_text(json.dumps({"items": []}), encoding="utf-8")
     assert load_agent_decision(str(path)) is None
+    path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"type": "apply_triage", **valid_item()},
+                    {"type": "apply_triage", **valid_item(event_key="issue:7:opened:other")},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_agent_decision(str(path)) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 1.5),
+        ("schema_version", True),
+        ("target_number", 3.7),
+        ("target_number", False),
+    ],
+)
+def test_parse_rejects_non_integer_values(field, value):
+    with pytest.raises(TriageError):
+        parse_decision(valid_item(**{field: value}))
 
 
 def test_derive_event_keys():

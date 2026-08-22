@@ -18,16 +18,13 @@ safe-outputs:
         target identity, current SHA, confidence, legal transition, label allowlist,
         and idempotency before writing one comment and managed labels.
       if: >-
-        (!cancelled()) &&
         needs.agent.result == 'success' &&
-        needs.detection.result == 'success' &&
-        contains(needs.agent.outputs.output_types, 'apply_triage')
+        needs.detection.result == 'success'
       runs-on: ubuntu-slim
       permissions:
         contents: read
         issues: write
         pull-requests: write
-      timeout-minutes: 5
       inputs:
         schema_version:
           description: "The integer schema version; must be 1."
