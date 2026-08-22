@@ -8,7 +8,9 @@ on:
   workflow_run:
     workflows: [CI]
     types: [completed]
-    branches: [master, main]
+    # workflow_run filters match the completed run's head branch; ci-evidence
+    # narrows this broad trigger to one completed pull_request CI run.
+    branches: ['**']
   pull_request_target:
     types: [opened, synchronize]
   roles: all
