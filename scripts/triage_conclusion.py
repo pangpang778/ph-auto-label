@@ -39,6 +39,10 @@ class TriageError(ValueError):
     """A safe, user-facing validation failure."""
 
 
+class GitHubNotFound(TriageError):
+    """A GitHub resource disappeared before the current operation completed."""
+
+
 @dataclass(frozen=True)
 class Decision:
     schema_version: int
@@ -90,7 +94,11 @@ class GitHubClient:
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 raw = response.read()
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise GitHubNotFound(f"GitHub resource not found: {method} {path}") from exc
+            raise TriageError(f"GitHub API request failed: {method} {path}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
             raise TriageError(f"GitHub API request failed: {method} {path}") from exc
         if not raw:
             return None
@@ -227,7 +235,7 @@ def _repository_id(event: dict[str, Any]) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def derive_target(event_name: str, event: dict[str, Any], current_pr: dict[str, Any] | None = None) -> Target:
+def derive_target(event_name: str, event: dict[str, Any]) -> Target:
     if event_name == "issues" and event.get("action") == "opened":
         issue = event.get("issue", {})
         number = issue.get("number")
@@ -363,7 +371,10 @@ def fallback_decision(target: Target, item: dict[str, Any], reason: str) -> Deci
 def apply_decision(client: GitHubClient, decision: Decision, item: dict[str, Any]) -> None:
     current_labels = label_names(item)
     for label in sorted(current_labels & MANAGED_LABELS):
-        client.remove_label(decision.target_number, label)
+        try:
+            client.remove_label(decision.target_number, label)
+        except GitHubNotFound:
+            pass
     if decision.category:
         client.add_label(decision.target_number, decision.category)
     client.add_label(decision.target_number, decision.state)

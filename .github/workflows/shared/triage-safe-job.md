@@ -17,6 +17,11 @@ safe-outputs:
         Submit exactly one structured triage decision. The trusted job validates
         target identity, current SHA, confidence, legal transition, label allowlist,
         and idempotency before writing one comment and managed labels.
+      if: >-
+        (!cancelled()) &&
+        needs.agent.result != 'skipped' &&
+        needs.detection.result == 'success' &&
+        contains(needs.agent.outputs.output_types, 'apply_triage')
       runs-on: ubuntu-slim
       permissions:
         contents: read

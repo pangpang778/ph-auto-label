@@ -4,9 +4,10 @@ import pytest
 
 from scripts.triage_conclusion import (
     AI_DISCLAIMER,
-    Decision,
+    GitHubNotFound,
     TriageError,
     already_processed,
+    apply_decision,
     comment_body,
     derive_target,
     fallback_decision,
@@ -43,6 +44,12 @@ class FakeClient:
     def add_comment(self, number, body):
         self.operations.append(("comment", body))
         self.comments.append({"body": body})
+
+
+class MissingLabelClient(FakeClient):
+    def remove_label(self, number, label):
+        self.operations.append(("remove", label))
+        raise GitHubNotFound("label was already removed")
 
 
 def valid_item(**overrides):
@@ -232,6 +239,17 @@ def test_successful_reevaluation_preserves_nonmanaged_labels(tmp_path):
     assert ("remove", "customer") not in client.operations
     assert ("add", "bug") in client.operations
     assert ("add", "ready-for-human") in client.operations
+
+
+def test_missing_managed_label_does_not_abort_application():
+    decision = parse_decision(valid_item())
+    client = MissingLabelClient(labels=["bug"])
+
+    apply_decision(client, decision, client.item)
+
+    assert ("add", "bug") in client.operations
+    assert ("add", "needs-info") in client.operations
+    assert client.operations[-1][0] == "comment"
 
 
 def test_successful_issue_comment_is_idempotent(tmp_path):
