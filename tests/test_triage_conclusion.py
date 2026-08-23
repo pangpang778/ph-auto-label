@@ -8,6 +8,7 @@ from scripts.triage_conclusion import (
     already_processed,
     apply_decision,
     comment_body,
+    dispatch_ref,
     derive_target,
     fallback_decision,
     label_names,
@@ -154,6 +155,11 @@ def test_derive_event_keys():
     }
     assert derive_target("issues", issue_event).event_key == "issue:7:opened:2026-08-22T00:00:00Z"
     assert derive_target("issue_comment", comment_event).event_key == "comment:99:created"
+
+
+def test_dispatch_ref_uses_trusted_repository_default_branch():
+    assert dispatch_ref({"repository": {"default_branch": "main"}}) == "main"
+    assert dispatch_ref({}) == "master"
 
 
 def test_fallback_preserves_one_existing_category():

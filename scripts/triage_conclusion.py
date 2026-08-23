@@ -461,6 +461,15 @@ def already_processed(comments: list[dict[str, Any]], event_key: str) -> bool:
     return any(marker in str(comment.get("body", "")) for comment in comments)
 
 
+def dispatch_ref(event: dict[str, Any]) -> str:
+    repository = event.get("repository", {})
+    candidate = repository.get("default_branch") if isinstance(repository, dict) else None
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    configured = os.environ.get("GITHUB_DEFAULT_BRANCH", "master")
+    return configured.strip() or "master"
+
+
 def run(event_name: str, event: dict[str, Any], client: GitHubClient, agent_path: str | None) -> str:
     if is_bot_or_system(event_name, event):
         return "skipped: bot or system event"
@@ -505,7 +514,7 @@ def run(event_name: str, event: dict[str, Any], client: GitHubClient, agent_path
         client,
         decision,
         item,
-        dispatch_ref=os.environ.get("GITHUB_REF_NAME", "master"),
+        dispatch_ref=dispatch_ref(event),
     )
     return f"applied: {result}"
 
