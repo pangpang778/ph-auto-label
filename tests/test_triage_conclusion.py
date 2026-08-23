@@ -11,6 +11,7 @@ from scripts.triage_conclusion import (
     dispatch_ref,
     derive_target,
     fallback_decision,
+    GitHubClient,
     label_names,
     load_agent_decision,
     parse_decision,
@@ -51,6 +52,37 @@ class FakeClient:
         if self.fail_dispatch:
             raise TriageError("dispatch failed")
         self.operations.append(("dispatch", workflow, ref, inputs))
+
+
+def test_workflow_dispatch_uses_the_dedicated_dispatch_token(monkeypatch):
+    observed = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b""
+
+    def fake_urlopen(request, timeout):
+        observed["authorization"] = request.get_header("Authorization")
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("scripts.triage_conclusion.urllib.request.urlopen", fake_urlopen)
+    client = GitHubClient(
+        "write-token",
+        "https://api.github.com",
+        "pangpang778/ph-auto-label",
+        dispatch_token="dispatch-token",
+    )
+
+    client.dispatch_workflow("implementation.lock.yml", "master", {"target_number": "40"})
+
+    assert observed == {"authorization": "Bearer dispatch-token", "timeout": 20}
 
 def valid_item(**overrides):
     item = {
