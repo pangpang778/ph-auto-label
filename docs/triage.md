@@ -455,6 +455,8 @@ Triage event: pr:36:sha:841791a4661acf419d3f06282e3e996b296a63f5
 
 下面的链接都是真实测试期间创建并处理过的 GitHub 对象。测试完成后这些对象已关闭，但评论、标签和 Actions 日志仍然可以查看。
 
+> **说明（Issue #50，disposable E2E 验证）**：在仓库允许 Actions 创建 PR 后，已完成一次完整生命周期验证——`Issue → Triage → ready-for-agent → Implementation Agent → draft PR → CI → merge → frontier finalizer`。实现 Agent 只在本文件补充这条说明并创建草稿 PR；合并后由受信任 finalizer 移除 `agent-running`/`ready-for-agent` 并关闭执行 Issue。该验证验证了 [Issue #50](https://github.com/pangpang778/ph-auto-label/issues/50) 与对应草稿 PR 全部按预期执行，Issue 与 PR 保留作为可追溯证据。
+
 | 场景 | 对象和结果 | Action 运行 |
 | --- | --- | --- |
 | Issue：`enhancement` + `ready-for-agent` | [Issue #28](https://github.com/pangpang778/ph-auto-label/issues/28) | [运行 32583828267](https://github.com/pangpang778/ph-auto-label/actions/runs/32583828267) |
