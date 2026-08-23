@@ -39,9 +39,12 @@ Before finishing, call the `apply-triage` safe output exactly once with these fi
 - `target_type`, `target_number`, `event_key`, and `head_sha` exactly as supplied by trusted context.
 - `head_sha` is empty for an Issue and is the current PR SHA for a PR.
 - `category` and `state` from the allowlists above.
-- `confidence` as a decimal between 0 and 1.
+- `confidence` as a JSON string containing a decimal between 0 and 1, for example `"0.95"`.
 - `reason` as concise plain text, no more than 4000 characters.
-- `missing_info` as a JSON array, usually `[]`, with no more than 20 short strings.
+- `missing_info` as a JSON string containing an array, usually `"[]"`, with no more than 20 short strings.
+
+The safe-output tool accepts these two fields as strings. Do not pass a JSON number or array directly:
+use confidence="0.95" and set missing_info to a string containing the JSON array text, such as "[]".
 
 Do not call the safe output more than once. Do not call built-in comment, label, PR, close, merge, or
 other mutation outputs. The trusted conclusion job validates all fields again and writes the only

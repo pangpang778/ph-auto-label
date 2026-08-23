@@ -8,7 +8,7 @@ safe-outputs:
     head_sha: string
     category: string
     state: string
-    confidence: number
+    confidence: string
     reason: string
     missing_info: string
   jobs:
