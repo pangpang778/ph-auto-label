@@ -84,5 +84,6 @@ safe-outputs:
         - name: Validate and apply triage decision
           env:
             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            GH_AW_CI_TRIGGER_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
           run: python scripts/triage_conclusion.py
 ---

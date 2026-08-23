@@ -29,6 +29,16 @@ def test_implementation_workflow_is_dispatchable_and_requires_the_execution_lock
     assert "protected-files: fallback-to-issue" in workflow
 
 
+def test_triage_dispatch_uses_the_ci_trigger_identity():
+    shared = (WORKFLOW_DIR / "shared" / "triage-safe-job.md").read_text(encoding="utf-8")
+    conversation = (WORKFLOW_DIR / "triage-conversation.md").read_text(encoding="utf-8")
+    pr_ci = (WORKFLOW_DIR / "triage-pr-ci.md").read_text(encoding="utf-8")
+
+    assert "GH_AW_CI_TRIGGER_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}" in shared
+    assert "GH_AW_CI_TRIGGER_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}" in conversation
+    assert "GH_AW_CI_TRIGGER_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}" in pr_ci
+
+
 @pytest.mark.unit
 def test_frontier_workflow_only_runs_after_a_merged_pull_request():
     workflow = (WORKFLOW_DIR / "frontier-advance.yml").read_text(encoding="utf-8")

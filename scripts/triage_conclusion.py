@@ -63,22 +63,37 @@ class Target:
 
 
 class GitHubClient:
-    def __init__(self, token: str, api_url: str, repository: str) -> None:
+    def __init__(
+        self,
+        token: str,
+        api_url: str,
+        repository: str,
+        *,
+        dispatch_token: str | None = None,
+    ) -> None:
         if not token:
             raise TriageError("GITHUB_TOKEN is missing")
         if not re.fullmatch(r"[^/\s]+/[^/\s]+", repository):
             raise TriageError("GITHUB_REPOSITORY is invalid")
         self.token = token
+        self.dispatch_token = dispatch_token or token
         self.base_url = api_url.rstrip("/")
         self.repository = repository
 
-    def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        token: str | None = None,
+    ) -> Any:
         if not path.startswith("/") or ".." in path:
             raise TriageError("unsafe GitHub API path")
         body = None
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": f"Bearer {token or self.token}",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "ph-auto-label-triage",
         }
@@ -143,6 +158,7 @@ class GitHubClient:
             "POST",
             f"/repos/{self.repository}/actions/workflows/{workflow}/dispatches",
             {"ref": ref, "inputs": inputs},
+            token=self.dispatch_token,
         )
 
 
@@ -531,6 +547,7 @@ def main() -> int:
             os.environ.get("GITHUB_TOKEN", os.environ.get("GH_TOKEN", "")),
             os.environ.get("GITHUB_API_URL", "https://api.github.com"),
             os.environ.get("GITHUB_REPOSITORY", ""),
+            dispatch_token=os.environ.get("GH_AW_CI_TRIGGER_TOKEN") or None,
         )
         result = run(event_name, event, client, os.environ.get("GH_AW_AGENT_OUTPUT"))
     except (OSError, json.JSONDecodeError, TriageError) as exc:
