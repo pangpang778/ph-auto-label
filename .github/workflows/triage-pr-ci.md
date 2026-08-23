@@ -147,6 +147,7 @@ jobs:
   conclusion:
     permissions:
       contents: read
+      actions: write
       issues: write
       pull-requests: write
     pre-steps:

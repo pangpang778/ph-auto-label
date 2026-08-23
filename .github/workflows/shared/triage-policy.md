@@ -18,14 +18,20 @@ Use exactly one canonical category and one canonical state:
 
 - Categories: `bug`, `enhancement`.
 - States: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
-- `ready-for-agent` is only a triage queue state. It never starts implementation or creates a PR.
+- `ready-for-agent` is an executable queue only for an Issue with a complete one-context brief. The
+  trusted conclusion job adds `agent-running` and dispatches the fixed `implementation` workflow.
+  It never permits direct writes to the default branch.
 - `ready-for-human` means a human merge or implementation decision is required.
-- `wontfix` is explanatory only in phase one. Never close an Issue or PR.
+- `wontfix` is a terminal decision for the current event. The trusted conclusion job comments and
+  closes the Issue or PR after validation; a later maintainer comment can reopen triage through the
+  explicit `wontfix -> needs-triage` transition.
 
 Use `needs-info` only when the comment names concrete missing information. Use `ready-for-agent`
 only when the next-step brief is complete. Use `ready-for-human` for a PR that has sufficient context
 and completed CI evidence but still needs a human merge decision. Use `needs-triage` when context is
-contradictory, the legal transition is unclear, or confidence is below 0.75.
+contradictory, the legal transition is unclear, or confidence is below 0.75. `needs-info` must include
+at least one concrete item in `missing_info`; after a reporter reply it must first return to
+`needs-triage` for a fresh evaluation.
 
 Before finishing, call the `apply-triage` safe output exactly once with these fields:
 

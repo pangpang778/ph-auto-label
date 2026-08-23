@@ -1,6 +1,6 @@
 ---
 name: Triage Conversations
-description: Classify new Issues and human Issue/PR comments without changing code.
+description: Classify new Issues and human Issue/PR comments, then route validated outcomes safely.
 strict: true
 private: true
 inlined-imports: true
@@ -63,6 +63,7 @@ jobs:
   conclusion:
     permissions:
       contents: read
+      actions: write
       issues: write
       pull-requests: write
     pre-steps:

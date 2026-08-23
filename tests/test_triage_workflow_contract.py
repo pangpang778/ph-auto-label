@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "triage-pr-ci.md"
+WORKFLOW_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+WORKFLOW = WORKFLOW_DIR / "triage-pr-ci.md"
 
 
 @pytest.mark.unit
@@ -13,3 +14,25 @@ def test_post_ci_trigger_covers_all_possible_pr_head_branches():
 
     assert "  workflow_run:" in workflow_run
     assert "    branches: ['**']" in workflow_run
+
+
+@pytest.mark.unit
+def test_implementation_workflow_is_dispatchable_and_requires_the_execution_lock():
+    workflow = (WORKFLOW_DIR / "implementation.md").read_text(encoding="utf-8")
+
+    assert "  workflow_dispatch:" in workflow
+    assert "target_number:" in workflow
+    assert "event_key:" in workflow
+    assert "ready-for-agent` and `agent-running` labels" in workflow
+    assert "PH_AUTO_LABEL_TARGET: issue:" in workflow
+    assert "create-pull-request:" in workflow
+    assert "protected-files: fallback-to-issue" in workflow
+
+
+@pytest.mark.unit
+def test_frontier_workflow_only_runs_after_a_merged_pull_request():
+    workflow = (WORKFLOW_DIR / "frontier-advance.yml").read_text(encoding="utf-8")
+
+    assert "types: [closed]" in workflow
+    assert "github.event.pull_request.merged == true" in workflow
+    assert "scripts/frontier_advance.py" in workflow
