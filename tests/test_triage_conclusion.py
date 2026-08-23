@@ -25,6 +25,7 @@ class FakeClient:
         self.pull_request = {"labels": list(self.item["labels"]), "head": {"sha": head_sha}}
         self.comments = []
         self.operations = []
+        self.fail_dispatch = False
 
     def get_issue_or_pr(self, number):
         return self.item
@@ -41,6 +42,14 @@ class FakeClient:
     def add_comment(self, number, body):
         self.operations.append(("comment", body))
         self.comments.append({"body": body})
+
+    def close_item(self, number):
+        self.operations.append(("close", number))
+
+    def dispatch_workflow(self, workflow, ref, inputs):
+        if self.fail_dispatch:
+            raise TriageError("dispatch failed")
+        self.operations.append(("dispatch", workflow, ref, inputs))
 
 def valid_item(**overrides):
     item = {
@@ -83,6 +92,20 @@ def test_parse_rejects_invalid_schema(overrides):
 def test_pull_request_requires_sha():
     with pytest.raises(TriageError):
         parse_decision(valid_item(target_type="pull_request"))
+
+
+def test_needs_info_requires_concrete_missing_items():
+    with pytest.raises(TriageError):
+        validate_transition(
+            parse_decision(valid_item(missing_info="[]")),
+            {"labels": []},
+        )
+
+    with pytest.raises(TriageError):
+        validate_transition(
+            parse_decision(valid_item(state="ready-for-human", missing_info='["still missing"]')),
+            {"labels": []},
+        )
 
 
 def test_load_agent_decision_requires_exactly_one(tmp_path):
@@ -165,6 +188,15 @@ def test_needs_triage_must_be_re_evaluated():
         validate_transition(decision, {"labels": [{"name": "needs-triage"}]})
 
 
+def test_needs_info_must_return_to_needs_triage_before_final_route():
+    decision = parse_decision(valid_item(state="needs-triage", missing_info="[]"))
+    validate_transition(decision, {"labels": [{"name": "needs-info"}]})
+
+    direct_route = parse_decision(valid_item(state="ready-for-agent", missing_info="[]"))
+    with pytest.raises(TriageError):
+        validate_transition(direct_route, {"labels": [{"name": "needs-info"}]})
+
+
 def test_comment_disclaimer_and_footer():
     decision = parse_decision(valid_item())
     body = comment_body(decision)
@@ -230,6 +262,80 @@ def test_fallback_preserves_nonmanaged_labels_and_is_idempotent():
     assert len(client.operations) == operation_count
 
 
+def test_ready_for_agent_dispatches_implementation_once(tmp_path):
+    event = {
+        "action": "opened",
+        "issue": {"number": 7, "created_at": "2026-08-22T00:00:00Z", "user": {"type": "User"}},
+    }
+    item = valid_item(
+        state="ready-for-agent",
+        missing_info="[]",
+        reason="The request has a complete implementation brief.",
+    )
+    path = tmp_path / "agent_output.json"
+    path.write_text(json.dumps({"items": [{"type": "apply_triage", **item}]}), encoding="utf-8")
+    client = FakeClient(labels=["customer"])
+
+    assert run("issues", event, client, str(path)) == "applied: agent-dispatched"
+    assert ("dispatch", "implementation.lock.yml", "master", {
+        "target_type": "issue",
+        "target_number": "7",
+        "event_key": "issue:7:opened:2026-08-22T00:00:00Z",
+        "head_sha": "",
+    }) in client.operations
+    assert any(kind == "labels" and "agent-running" in labels for kind, labels in client.operations)
+    assert client.operations[-1][0] == "comment"
+    operation_count = len(client.operations)
+    assert run("issues", event, client, str(path)) == "skipped: event already processed"
+    assert len(client.operations) == operation_count
+
+
+def test_ready_for_agent_does_not_dispatch_when_an_agent_is_running(tmp_path):
+    event = {
+        "action": "opened",
+        "issue": {"number": 7, "created_at": "2026-08-22T00:00:00Z", "user": {"type": "User"}},
+    }
+    item = valid_item(state="ready-for-agent", missing_info="[]")
+    path = tmp_path / "agent_output.json"
+    path.write_text(json.dumps({"items": [{"type": "apply_triage", **item}]}), encoding="utf-8")
+    client = FakeClient(labels=["customer", "agent-running"])
+
+    assert run("issues", event, client, str(path)) == "applied: applied"
+    assert not any(operation[0] == "dispatch" for operation in client.operations)
+
+
+def test_ready_for_agent_dispatch_failure_rolls_back_labels_and_comment(tmp_path):
+    event = {
+        "action": "opened",
+        "issue": {"number": 7, "created_at": "2026-08-22T00:00:00Z", "user": {"type": "User"}},
+    }
+    item = valid_item(state="ready-for-agent", missing_info="[]")
+    path = tmp_path / "agent_output.json"
+    path.write_text(json.dumps({"items": [{"type": "apply_triage", **item}]}), encoding="utf-8")
+    client = FakeClient(labels=["customer"])
+    client.fail_dispatch = True
+
+    with pytest.raises(TriageError):
+        run("issues", event, client, str(path))
+    assert client.operations[-1] == ("labels", ("customer",))
+    assert not any(operation[0] == "comment" for operation in client.operations)
+
+
+def test_wontfix_closes_open_issue(tmp_path):
+    event = {
+        "action": "opened",
+        "issue": {"number": 7, "created_at": "2026-08-22T00:00:00Z", "user": {"type": "User"}},
+    }
+    item = valid_item(state="wontfix", missing_info="[]", reason="This request is outside the supported scope.")
+    path = tmp_path / "agent_output.json"
+    path.write_text(json.dumps({"items": [{"type": "apply_triage", **item}]}), encoding="utf-8")
+    client = FakeClient(labels=["customer"])
+
+    assert run("issues", event, client, str(path)) == "applied: closed-wontfix"
+    assert ("close", 7) in client.operations
+    assert client.operations[-1] == ("close", 7)
+
+
 def test_successful_reevaluation_preserves_nonmanaged_labels(tmp_path):
     item = valid_item(
         target_type="pull_request",
@@ -237,7 +343,7 @@ def test_successful_reevaluation_preserves_nonmanaged_labels(tmp_path):
         event_key="comment:99:created",
         head_sha="a" * 40,
         category="bug",
-        state="ready-for-human",
+        state="needs-triage",
         missing_info="[]",
     )
     path = tmp_path / "agent_output.json"
@@ -248,8 +354,8 @@ def test_successful_reevaluation_preserves_nonmanaged_labels(tmp_path):
         "comment": {"id": 99, "user": {"type": "User"}},
     }
     client = FakeClient(labels=["enhancement", "needs-info", "customer"], head_sha="a" * 40)
-    assert run("issue_comment", event, client, str(path)) == "applied: decision"
-    assert ("labels", ("bug", "customer", "ready-for-human")) in client.operations
+    assert run("issue_comment", event, client, str(path)) == "applied: applied"
+    assert ("labels", ("bug", "customer", "needs-triage")) in client.operations
     assert client.operations[-1][0] == "comment"
 
 
@@ -271,7 +377,7 @@ def test_successful_issue_comment_is_idempotent(tmp_path):
     path.write_text(json.dumps({"items": [{"type": "apply_triage", **item}]}), encoding="utf-8")
     client = FakeClient(labels=["enhancement", "customer"], head_sha="a" * 40)
 
-    assert run("issue_comment", event, client, str(path)) == "applied: decision"
+    assert run("issue_comment", event, client, str(path)) == "applied: applied"
     first_operation_count = len(client.operations)
     assert run("issue_comment", event, client, str(path)) == "skipped: event already processed"
     assert len(client.operations) == first_operation_count

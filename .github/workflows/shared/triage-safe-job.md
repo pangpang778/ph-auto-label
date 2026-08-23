@@ -23,6 +23,7 @@ safe-outputs:
       runs-on: ubuntu-slim
       permissions:
         contents: read
+        actions: write
         issues: write
         pull-requests: write
       inputs:
