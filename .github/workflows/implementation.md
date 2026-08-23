@@ -42,8 +42,8 @@ checkout:
   fetch-depth: 0
 model: ${{ vars.GH_AW_LLM_MODEL }}
 timeout-minutes: 45
-max-turns: 20
-max-ai-credits: 1500
+max-turns: 32
+max-ai-credits: 3000
 max-daily-ai-credits: 6000
 models:
   default-ai-credits-pricing:
@@ -105,6 +105,9 @@ Before editing, read the target Issue through the read-only GitHub tools and ver
 2. It has `ready-for-agent` and `agent-running` labels.
 3. It does not have `triage-paused`.
 4. The Issue contains a complete implementation brief and objective acceptance criteria.
+
+Keep GitHub reads bounded: once the target Issue and repository guidance are verified, reuse that
+context instead of repeatedly querying the same Issue or label list.
 
 If any check fails, do not edit files. Call `noop` with the reason. If the task is not safely
 implementable or has no valid code change, call `add_comment` with the blocker and remove both
