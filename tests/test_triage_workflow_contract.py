@@ -41,6 +41,17 @@ def test_triage_dispatch_uses_the_ci_trigger_identity():
     assert "GH_AW_CI_TRIGGER_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}" in pr_ci
 
 
+def test_triage_safe_output_uses_string_encoded_structured_fields():
+    shared = (WORKFLOW_DIR / "shared" / "triage-safe-job.md").read_text(encoding="utf-8")
+    policy = (WORKFLOW_DIR / "shared" / "triage-policy.md").read_text(encoding="utf-8")
+
+    assert "confidence: string" in shared
+    assert 'confidence` as a JSON string' in policy
+    assert 'missing_info` as a JSON string' in policy
+    assert 'confidence="0.95"' in policy
+    assert 'set missing_info to a string containing the JSON array text' in policy
+
+
 @pytest.mark.unit
 def test_frontier_workflow_only_runs_after_a_merged_pull_request():
     workflow = (WORKFLOW_DIR / "frontier-advance.yml").read_text(encoding="utf-8")
