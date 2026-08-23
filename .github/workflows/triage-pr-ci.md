@@ -161,6 +161,7 @@ jobs:
       - name: Apply deterministic fallback when needed
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_AW_CI_TRIGGER_TOKEN: ${{ secrets.GH_AW_CI_TRIGGER_TOKEN }}
           GH_AW_AGENT_OUTPUT: ""
         run: python scripts/triage_conclusion.py
 ---
