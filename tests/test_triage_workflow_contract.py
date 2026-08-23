@@ -21,6 +21,8 @@ def test_implementation_workflow_is_dispatchable_and_requires_the_execution_lock
     workflow = (WORKFLOW_DIR / "implementation.md").read_text(encoding="utf-8")
 
     assert "  workflow_dispatch:" in workflow
+    assert "max-turns: 32" in workflow
+    assert "max-ai-credits: 3000" in workflow
     assert "target_number:" in workflow
     assert "event_key:" in workflow
     assert "ready-for-agent` and `agent-running` labels" in workflow
