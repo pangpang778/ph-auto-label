@@ -67,12 +67,11 @@ jobs:
         id: ocr
         uses: alibaba/open-code-review@66120291271b2e605e420e9f11fbd6448f06163f # v1.9.10
         with:
-          llm_url: https://openrouter.ai/api/v1/messages
-          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
-          llm_model: stealth/ox-alpha
+          llm_url: https://ark.cn-beijing.volces.com/api/coding
+          llm_auth_token: ${{ secrets.GH_AW_ANTHROPIC_API_KEY }}
+          llm_model: ${{ vars.GH_AW_LLM_MODEL }}
           llm_use_anthropic: 'true'
-          llm_auth_header: authorization
-          llm_extra_body: '{"thinking":{"type":"enabled","budget_tokens":4096}}'
+          llm_auth_header: x-api-key
           github_token: ${{ secrets.GITHUB_TOKEN }}
           language: Chinese
           review_concurrency: '4'
