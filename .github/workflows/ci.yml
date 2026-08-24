@@ -72,9 +72,12 @@ jobs:
           llm_model: stealth/ox-alpha
           llm_use_anthropic: 'true'
           llm_auth_header: authorization
+          llm_timeout: '600'
           github_token: ${{ secrets.GITHUB_TOKEN }}
           language: Chinese
-          review_concurrency: '4'
+          # Serialize file reviews for the shared OpenRouter upstream so one
+          # model session cannot starve the other sessions' tool budgets.
+          review_concurrency: '1'
           incremental: 'true'
 
       - name: Post review decision summary
