@@ -45,7 +45,8 @@ jobs:
   open-code-review:
     name: OpenCodeReview
     needs: lint-and-test
-    # Enable only after the repository LLM credentials have been configured.
+    # Review pull requests through the OpenRouter upstream used by
+    # OpenRouter-Ox-Alpha. The API key remains a repository secret.
     if: >-
       github.event_name == 'pull_request' &&
       vars.OCR_REVIEW_ENABLED == 'true' &&
@@ -66,10 +67,11 @@ jobs:
         id: ocr
         uses: alibaba/open-code-review@5b37b5f8e225f42e2cf410c550e400083df83610 # v1.9.2
         with:
-          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_url: https://openrouter.ai/api
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
-          llm_model: ${{ secrets.OCR_LLM_MODEL }}
-          llm_use_anthropic: ${{ secrets.OCR_LLM_USE_ANTHROPIC }}
+          llm_model: stealth/ox-alpha
+          llm_use_anthropic: 'true'
+          llm_auth_header: authorization
           github_token: ${{ secrets.GITHUB_TOKEN }}
           language: Chinese
           review_concurrency: '4'
