@@ -44,7 +44,12 @@ class DepthAnythingDepthEstimator:
         pipe = self._load()
         img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         result = pipe(img)
-        depth = np.array(result["predicted_depth"])
+        value = result["predicted_depth"]
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        depth = np.asarray(value)
+        if depth.ndim == 3:
+            depth = np.squeeze(depth, axis=0)
         if depth.shape[:2] != frame.shape[:2]:
             depth = cv2.resize(depth, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
         return depth

@@ -76,7 +76,9 @@ class _DepthDataset:
         import torch
         it = self.items[i]
         img = cv2.imread(os.path.join(self.dataset_dir, it["frame"]))
-        depth = np.load(os.path.join(self.dataset_dir, it["depth"])).astype(np.float32)
+        depth = np.load(
+            os.path.join(self.dataset_dir, it["depth"]), allow_pickle=False
+        ).astype(np.float32)
         img = cv2.resize(img, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
         depth = cv2.resize(depth, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -226,7 +228,9 @@ def box_median_deviation(dataset_dir, val_items, checkpoint_path, max_frames=200
     devs = []
     for it in val_items[:max_frames]:
         img = cv2.imread(os.path.join(dataset_dir, it["frame"]))
-        teach = np.load(os.path.join(dataset_dir, it["depth"])).astype(np.float32)
+        teach = np.load(
+            os.path.join(dataset_dir, it["depth"]), allow_pickle=False
+        ).astype(np.float32)
         pred = est.estimate(img)
         h, w = img.shape[:2]
         boxes = det.predict(img, classes=[2], conf=0.35, verbose=False)

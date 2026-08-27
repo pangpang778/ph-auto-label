@@ -13,7 +13,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.services import depth_train_service  # noqa: E402
 from app.services.video_test_service import resolve_depth_model  # noqa: E402
+from plugins.yolo_depth.depth_estimator import DepthAnythingDepthEstimator  # noqa: E402
 from plugins.yolo_depth.depth_models import list_depth_models  # noqa: E402
 from plugins.yolo_depth.depth_student import gradmatch_loss, silog_loss  # noqa: E402
 from plugins.yolo_depth.estimator import build_vd_label  # noqa: E402
@@ -78,6 +80,61 @@ def test_list_depth_models_builtins_and_trained(tmp_path):
     # 权重文件不存在的注册项被跳过（内置项仍在，只看 trained）
     assert not [e for e in list_depth_models([{"id": "m", "path": str(tmp_path / "gone.pt")}])
                 if e["source"] == "trained"]
+
+
+@pytest.mark.unit
+def test_depth_dataset_disables_pickle_loading(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(
+        depth_train_service.cv2,
+        "imread",
+        lambda _path: np.zeros((4, 4, 3), dtype=np.uint8),
+    )
+
+    def fake_load(_path, **kwargs):
+        observed.update(kwargs)
+        return np.ones((4, 4), dtype=np.float32)
+
+    monkeypatch.setattr(depth_train_service.np, "load", fake_load)
+    dataset = depth_train_service._DepthDataset(
+        ".", [{"frame": "frame.jpg", "depth": "depth.npy"}], input_size=4
+    )
+
+    dataset[0]
+
+    assert observed["allow_pickle"] is False
+
+
+@pytest.mark.unit
+def test_depth_anything_moves_tensor_output_to_cpu(monkeypatch):
+    class FakeTensor:
+        def __init__(self):
+            self.cpu_called = False
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            self.cpu_called = True
+            return self
+
+        def numpy(self):
+            assert self.cpu_called
+            return np.ones((1, 3, 4), dtype=np.float32)
+
+    value = FakeTensor()
+
+    class FakePipe:
+        def __call__(self, _image):
+            return {"predicted_depth": value}
+
+    estimator = DepthAnythingDepthEstimator()
+    monkeypatch.setattr(estimator, "_load", lambda: FakePipe())
+
+    depth = estimator.estimate(np.zeros((6, 8, 3), dtype=np.uint8))
+
+    assert value.cpu_called
+    assert depth.shape == (6, 8)
 
 
 # ---------------------------------------------------------------------------
