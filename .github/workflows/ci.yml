@@ -72,6 +72,8 @@ jobs:
           llm_model: ${{ vars.GH_AW_LLM_MODEL }}
           llm_use_anthropic: 'true'
           llm_auth_header: x-api-key
+          llm_timeout: '120'
+          ocr_version: '1.9.10'
           github_token: ${{ secrets.GITHUB_TOKEN }}
           language: Chinese
           review_concurrency: '4'
