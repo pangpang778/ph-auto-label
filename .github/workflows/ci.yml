@@ -76,7 +76,7 @@ jobs:
           ocr_version: '1.9.10'
           github_token: ${{ secrets.GITHUB_TOKEN }}
           language: Chinese
-          review_concurrency: '4'
+          review_concurrency: '8'
           incremental: 'true'
 
       - name: Post review decision summary
