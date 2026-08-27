@@ -280,8 +280,9 @@
                     <select id="aiEngineSelect" class="form-control">
                         <option value="yolo11" selected>YOLO11（业务模型）</option>
                         <option value="sam3">SAM3（冷启动预标）</option>
+                        <option value="vlm">VLM（开放词汇·文本提示）</option>
                     </select>
-                    <small>冷启动推荐 SAM3；迭代阶段推荐业务 YOLO 模型</small>
+                    <small>冷启动推荐 SAM3/VLM；迭代阶段推荐业务 YOLO 模型</small>
                 </div>
 
                 <div class="form-group">
@@ -292,7 +293,7 @@
                     <small>请先在设置中安装YOLO11并下载或上传模型</small>
                 </div>
                 <div class="form-group" id="worldClassesGroup" style="display: none;">
-                    <label for="worldClassesInput">SAM3目标类（逗号分隔）:</label>
+                    <label for="worldClassesInput">目标类（逗号分隔，SAM3/VLM）:</label>
                     <input type="text" id="worldClassesInput" class="form-control" placeholder="base,frame,mirror,screw">
                     <small>示例：base,frame,mirror,screw；支持英文描述如 "person with blue cloth"；为空时默认读取当前类别列表</small>
                 </div>
@@ -690,7 +691,36 @@
                 <div class="tool-section">
                     <h4>训练准备度</h4>
                     <div id="trainReadiness" class="timeline-summary">Loading...</div>
-                    <div id="trainCudaStatus" class="timeline-summary">CUDA状态：检测中...</div>
+                    <div id="trainTaskTypeRow" class="timeline-inline-row">
+                        <label><input type="radio" name="trainTaskType" value="detect" checked> 检测训练</label>
+                        <label><input type="radio" name="trainTaskType" value="depth"> 深度蒸馏</label>
+                    </div>
+                    <div id="depthTrainPanel" style="display:none;">
+                        <div class="train-section-title">伪标签生成（MoGe 教师）</div>
+                        <div id="pseudoVideoSelectWrap">
+                            <select id="pseudoVideoSelect" multiple size="5"
+                                style="width:100%; background:#1a2332; color:#e8edf4; border:1px solid #3a4a5f; border-radius:4px;"></select>
+                        </div>
+                        <div class="timeline-inline-row">
+                            <label>抽帧间隔(秒)</label>
+                            <input type="number" id="pseudoInterval" value="0.2" min="0.05" max="0.5" step="0.05">
+                            <button id="refreshPseudoVideosBtn" class="btn btn-secondary btn-small" type="button">刷新视频</button>
+                        </div>
+                        <div class="timeline-actions">
+                            <button id="startPseudoBtn" class="btn btn-success" type="button">生成伪标签数据集</button>
+                        </div>
+                        <div class="train-section-title">深度蒸馏训练</div>
+                        <div class="timeline-inline-row">
+                            <select id="depthDatasetSelect" style="flex:1;">
+                                <option value="">暂无已完成数据集</option>
+                            </select>
+                            <label>Epochs</label>
+                            <input type="number" id="depthEpochs" value="50" min="1" max="500">
+                        </div>
+                        <div class="timeline-actions">
+                            <button id="startDepthTrainBtn" class="btn btn-success" type="button">开始深度蒸馏</button>
+                        </div>
+                    </div>
                     <div class="train-split-card">
                         <div class="train-section-title">高级数据切分</div>
                         <div class="train-split-ratios">
@@ -775,6 +805,7 @@
     <script src="{{ url_for('static', filename='js/ai_annotate_run.js') }}"></script>
     <script src="{{ url_for('static', filename='js/ai_annotate_batch.js') }}"></script>
     <script src="{{ url_for('static', filename='js/training.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/training_depth.js') }}"></script>
     <script src="{{ url_for('static', filename='js/training_jobs.js') }}"></script>
     <script src="{{ url_for('static', filename='js/training_chart.js') }}"></script>
     <script src="{{ url_for('static', filename='js/training_ui.js') }}"></script>

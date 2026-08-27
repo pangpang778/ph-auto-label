@@ -22,6 +22,7 @@ from app.common.utils import now_iso
 from app.repositories.train_jobs_repo import mutate_train_job, read_train_jobs
 from app.services import models_service
 from training_artifacts import read_log_tail
+from plugins.yolo_depth.depth_models import TEACHER_MODEL_ID
 
 
 def append_train_log(job: dict, message: str) -> None:
@@ -61,14 +62,80 @@ def run_training_job(job_id: str, root_path: str = "") -> None:
     if not job:
         return
     job_dir = _prepare_job_dir(job)
+    task_type = job.get("task_type") or "detect"
     try:
-        dataset = _build_dataset_phase(job, job_dir)
-        run_dir = _train_model_phase(job, job_dir, dataset)
-        model_info = _register_trained_model(job, job_id, run_dir)
+        if task_type == "pseudo":
+            dataset_dir = _run_pseudo_phase(job, job_dir)
+            _mark_completed_plain(job, f"伪标签数据集就绪: {dataset_dir}",
+                                  artifact_path=dataset_dir)
+            return
+        if task_type == "depth":
+            result = _train_depth_phase(job, job_dir)
+        else:
+            dataset = _build_dataset_phase(job, job_dir)
+            run_dir = _train_model_phase(job, job_dir, dataset)
+            result = {"weights_source": run_dir}
+        model_info = _register_trained_model(
+            job, job_id, result["weights_source"],
+            kind=("depth" if task_type == "depth" else "detect"),
+            subdir=("depth" if task_type == "depth" else ""),
+            metrics=result.get("metrics") or {},
+        )
         _mark_completed(job, model_info)
     except Exception as exc:
         _mark_failed(job, exc)
-        _cleanup_failed_dataset(job, job_dir)
+        # ponytail: 只清理 detect 任务自己拷贝的数据集；depth 任务的
+        # dataset_dir 是伪标签任务的共享产物，失败时绝不能删。
+        if task_type == "detect":
+            _cleanup_failed_dataset(job, job_dir)
+
+
+def _make_progress_cb(job: dict):
+    """进度回调工厂：写训练日志并持久化进度（pseudo/depth 共用）。"""
+    def on_progress(pct, msg):
+        append_train_log(job, msg)
+        _persist_job_delta(job["id"], {
+            "progress": max(int(job.get("progress", 0) or 0), min(99, int(pct))),
+            "message": msg,
+            "log_tail": job.get("log_tail", ""),
+            "updated_at": now_iso(),
+        })
+    return on_progress
+
+
+def _run_pseudo_phase(job: dict, job_dir: str) -> str:
+    from app.services.depth_label_service import run_pseudo_labeling
+
+    dataset_dir = os.path.join(job_dir, "dataset")
+    manifest = run_pseudo_labeling(job["videos"], float(job.get("interval_s", 0.2)),
+                                   dataset_dir, progress_cb=_make_progress_cb(job))
+    job["split_counts"] = {"frames": manifest["frames_total"]}
+    return dataset_dir
+
+
+def _train_depth_phase(job: dict, job_dir: str) -> dict:
+    from app.services.depth_train_service import train_depth_student
+
+    result = train_depth_student(job, job_dir, progress_cb=_make_progress_cb(job))
+    job["split_counts"] = result.get("splits", {})
+    return {"weights_source": result["checkpoint_path"],
+            "metrics": result.get("metrics") or {}}
+
+
+def _mark_completed_plain(job: dict, message: str, artifact_path: str = "") -> None:
+    """非注册类任务（pseudo）的完成标记：无模型产物。"""
+    append_train_log(job, message)
+    delta = {
+        "status": "completed",
+        "progress": 100,
+        "message": message,
+        "artifact_path": artifact_path,
+        "split_counts": job.get("split_counts", {}),
+        "log_tail": job.get("log_tail", ""),
+        "updated_at": now_iso(),
+    }
+    job.update(delta)
+    _persist_job_delta(job["id"], delta)
 
 
 def _cleanup_failed_dataset(job: dict, job_dir: str) -> None:
@@ -232,11 +299,20 @@ def _resolve_trained_model(run_dir: str) -> str:
     raise FileNotFoundError("Training finished but no model artifact found in weights/")
 
 
-def _register_trained_model(job: dict, job_id: str, run_dir: str) -> dict:
-    trained_model = _resolve_trained_model(run_dir)
-    results_csv = os.path.join(run_dir, "results.csv")
-    results_png = os.path.join(run_dir, "results.png")
-    metrics = _extract_metrics_from_results_csv(results_csv)
+def _register_trained_model(job: dict, job_id: str, weights_source: str,
+                            kind: str = "detect", subdir: str = "",
+                            metrics: dict | None = None) -> dict:
+    trained_model = weights_source
+    if kind == "detect":
+        trained_model = _resolve_trained_model(weights_source)
+        run_dir = weights_source
+        results_csv = os.path.join(run_dir, "results.csv")
+        results_png = os.path.join(run_dir, "results.png")
+        metrics = _extract_metrics_from_results_csv(results_csv)
+    else:
+        results_csv = results_png = ""
+        run_dir = ""  # 深度学生无 ultralytics run 目录，checkpoint 在伪标签任务侧
+        metrics = dict(metrics or {})
     model_id = f"model_{uuid.uuid4().hex[:10]}"
     # H6: copy weights to a temp name FIRST (no lock) so a copy failure leaves
     # no registry record; the atomic register then renames temp -> <version>.pt
@@ -247,7 +323,8 @@ def _register_trained_model(job: dict, job_id: str, run_dir: str) -> dict:
     shutil.copy2(trained_model, temp_weights_path)
     base_record = {
         "id": model_id,
-        "parent_model": job.get("base_model", ""),
+        "kind": kind,
+        "parent_model": job.get("base_model", "") or (TEACHER_MODEL_ID if kind == "depth" else ""),
         "mode": job.get("mode", "incremental"),
         "metrics": metrics,
         "created_at": now_iso(),
@@ -261,7 +338,7 @@ def _register_trained_model(job: dict, job_id: str, run_dir: str) -> dict:
     }
     try:
         version, model_filename, model_dst = models_service.register_trained_model_record(
-            job.get("mode", "incremental"), base_record, temp_weights_path
+            job.get("mode", "incremental"), base_record, temp_weights_path, subdir=subdir
         )
     except Exception:
         # Atomic registration failed: clean up the temp weights and re-raise so
@@ -271,7 +348,9 @@ def _register_trained_model(job: dict, job_id: str, run_dir: str) -> dict:
         except OSError:
             pass
         raise
-    models_service.set_active(model_id=model_id, model_name=model_filename, model_path=model_dst)
+    if kind == "detect":
+        # 深度模型不参与"生产检测模型"，不能动 active_model.json
+        models_service.set_active(model_id=model_id, model_name=model_filename, model_path=model_dst)
     return {
         "model_id": model_id,
         "version": version,

@@ -10,18 +10,14 @@ elsewhere (e.g. ``0.0.0.0``) only when you intentionally want external access.
 import os
 
 from app import create_app
-from plugins.sam3_service import sam3_service
 
 app = create_app()
 
 
 if __name__ == "__main__":
-    try:
-        sam3_service.load_model()
-        sam3_service.warmup()
-    except Exception as e:
-        print(f"[WARNING] SAM3 model failed to load: {e}")
-        print("SAM3 auto-annotation will not be available. Set SAM3_MODEL_PATH env var or place model at plugins/sam3/models/model.pt")
+    # SAM3 不再启动即预加载：8GB 显存下会把运行中的 LA/Qwen 后端挤死。
+    # 首次 SAM3 请求时按需加载（detect_frame/_require_sam3_loaded 内部
+    # 会先停 VLM 容器腾显存，串行互斥见 plugins/sam3_service.py）。
 
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
     host = os.environ.get("FLASK_HOST", "127.0.0.1")

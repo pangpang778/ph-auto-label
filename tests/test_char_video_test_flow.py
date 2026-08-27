@@ -43,6 +43,11 @@ def _patch_video_externals(monkeypatch, job_id="job-xyz"):
         "get_job",
         lambda jid: {"id": jid, "status": "completed"} if jid == job_id else None,
     )
+    monkeypatch.setattr(
+        training_app.video_inference_service,
+        "stop_job",
+        lambda jid: {"stopped": True, "status": "stopping"} if jid == job_id else None,
+    )
     # Only "fake.mp4" resolves; any other name is treated as unknown (None).
     monkeypatch.setattr(
         "app.blueprints.video_test.resolve_video_path",
@@ -143,6 +148,36 @@ def test_video_test_start_rejects_unknown_video_with_400(isolated_app, monkeypat
     # Assert
     assert response.status_code == 400
     assert "error" in response.get_json()
+
+
+@pytest.mark.integration
+def test_video_test_start_depth_track_returns_job_id(isolated_app, monkeypatch):
+    # Arrange
+    _patch_video_externals(monkeypatch)
+    client = isolated_app.test_client()
+
+    # Act — YOLO detector + depth_track mode dispatched to the mocked launcher
+    response = client.post(
+        "/api/video-test/start",
+        json={"engine": "yolo", "mode": "depth_track", "target_fps": 2, "video_name": "fake.mp4"},
+    )
+
+    # Assert
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["job_id"] == "job-xyz"
+    assert body["status"] == "running"
+
+
+@pytest.mark.integration
+def test_video_test_stop_returns_stopping_state(isolated_app, monkeypatch):
+    _patch_video_externals(monkeypatch)
+    client = isolated_app.test_client()
+
+    response = client.post("/api/video-test/job/job-xyz/stop")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"stopped": True, "status": "stopping"}
 
 
 @pytest.mark.integration

@@ -64,9 +64,9 @@ async function startBatchAnnotate() {
         return;
     }
     const installPath = document.getElementById('yolo11InstallPath')?.value || 'plugins/yolo11';
-    const worldClasses = engine === 'sam3' ? getWorldClassesInput() : [];
+    const worldClasses = (engine === 'sam3' || engine === 'vlm') ? getWorldClassesInput() : [];
 
-    if (engine === 'sam3' && worldClasses.length === 0) {
+    if ((engine === 'sam3' || engine === 'vlm') && worldClasses.length === 0) {
         showToast('请先输入 SAM3 的目标类（如 base,frame,mirror,screw）');
         return;
     }
@@ -139,7 +139,7 @@ async function startBatchAnnotate() {
 
         try {
             // 使用批量API
-            const endpoint = engine === 'sam3' ? '/api/ai-annotate-sam3-batch' : '/api/ai-annotate-batch';
+            const endpoint = {'sam3': '/api/ai-annotate-sam3-batch', 'vlm': '/api/ai-annotate-vlm-batch'}[engine] || '/api/ai-annotate-batch';
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
@@ -148,10 +148,12 @@ async function startBatchAnnotate() {
                 body: JSON.stringify({
                     image_names: batchImageNames,
                     model_name: model,
+                    model: engine === 'vlm' ? aiAnnotateModel : undefined,
                     confidence: confidence,
                     install_path: installPath,
                     device: 'auto',
-                    world_classes: worldClasses
+                    world_classes: worldClasses,
+                    target_classes: worldClasses
                 })
             });
 

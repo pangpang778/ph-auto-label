@@ -15,6 +15,17 @@ function enableAiAnnotate() {
         return;
     }
 
+    if (aiAnnotateEngine === 'vlm') {
+        const worldClasses = getWorldClassesInput();
+        if (!worldClasses.length) {
+            showToast('请先输入至少一个目标类');
+            return;
+        }
+        showToast('大模型(VLM) 将按区间执行批量预标注，逐张推理较慢，请耐心等待...');
+        startBatchAnnotate();
+        return;
+    }
+
     if (aiAnnotateEngine === 'sam3') {
         const worldClasses = getWorldClassesInput();
         if (!worldClasses.length) {
@@ -137,8 +148,8 @@ function performAiAnnotate() {
     const targetImage = currentImage;
 
     const installPath = document.getElementById('yolo11InstallPath')?.value || 'plugins/yolo11';
-    const worldClasses = aiAnnotateEngine === 'sam3' ? getWorldClassesInput() : [];
-    const endpoint = aiAnnotateEngine === 'sam3' ? '/api/ai-annotate-sam3' : '/api/ai-annotate';
+    const worldClasses = (aiAnnotateEngine === 'sam3' || aiAnnotateEngine === 'vlm') ? getWorldClassesInput() : [];
+    const endpoint = {'sam3': '/api/ai-annotate-sam3', 'vlm': '/api/ai-annotate-vlm'}[aiAnnotateEngine] || '/api/ai-annotate';
 
     fetch(endpoint, {
         method: 'POST',
@@ -148,6 +159,7 @@ function performAiAnnotate() {
         body: JSON.stringify({
             image_name: targetImage,
             model_name: aiAnnotateModel,
+            model: aiAnnotateEngine === 'vlm' ? aiAnnotateModel : undefined,
             confidence: aiAnnotateConfidence,
             install_path: installPath,
             device: 'auto',

@@ -31,9 +31,37 @@ class SAM3Service:
     def is_loaded(self) -> bool:
         return self._loaded
 
+    def unload(self) -> None:
+        """释放模型显存（LocateAnything 等大模型需要错峰共存）。"""
+        with self._model_lock:
+            self._predictor = None
+            self._loaded = False
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    def _stop_vlm_backends(self) -> None:
+        """8GB 显存互斥：SAM3 加载前停掉 VLM 容器（与 vlm_service._ensure_backend
+        卸载本模型对偶，保证 SAM3 与大模型串行跑）。"""
+        import subprocess
+        try:
+            from plugins.vlm_service import VLM_BACKENDS
+            containers = [c["container"] for c in VLM_BACKENDS.values() if c.get("container")]
+        except Exception:
+            return
+        for name in containers:
+            try:
+                subprocess.run(["docker", "stop", name], capture_output=True, timeout=120)
+            except Exception:
+                pass
+
     def load_model(self, model_path: Optional[str] = None) -> None:
         if self._predictor is not None:
             return
+        self._stop_vlm_backends()
         with self._model_lock:
             if self._predictor is not None:
                 return
@@ -100,7 +128,8 @@ class SAM3Service:
     ) -> List[Dict[str, Any]]:
         """Run SAM3 detection on an image file. Returns annotation-compatible dicts."""
         if not self._loaded:
-            raise RuntimeError("SAM3 model not loaded. Call load_model() first.")
+            # 被大模型挤掉后按需重载（load_model 幂等，内部先停 VLM 容器）
+            self.load_model()
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
 
@@ -134,7 +163,8 @@ class SAM3Service:
     ) -> Dict[str, List[Dict[str, Any]]]:
         """Run SAM3 detection on multiple image files. Returns {path: [annotations]}."""
         if not self._loaded:
-            raise RuntimeError("SAM3 model not loaded. Call load_model() first.")
+            # 被大模型挤掉后按需重载（load_model 幂等，内部先停 VLM 容器）
+            self.load_model()
 
         text_list = [t.strip() for t in (text or []) if t.strip()]
         if not text_list:
@@ -182,7 +212,8 @@ class SAM3Service:
         供视频逐帧推理复用单例 predictor，避免每帧重载。
         """
         if not self._loaded:
-            raise RuntimeError("SAM3 model not loaded. Call load_model() first.")
+            # 被大模型挤掉后按需重载（load_model 幂等，内部先停 VLM 容器）
+            self.load_model()
         text_list = [t.strip() for t in (text or []) if t.strip()]
         if not text_list:
             raise ValueError("text (target classes) is required for SAM3 detection")

@@ -39,17 +39,39 @@
                     <div class="vt-engine">
                         <label class="vt-radio"><input type="radio" name="engine" value="yolo" checked> YOLO</label>
                         <label class="vt-radio"><input type="radio" name="engine" value="sam3"> SAM3</label>
+                        <label class="vt-radio"><input type="radio" name="engine" value="vlm"> VLM</label>
                     </div>
 
                     <div id="yoloPanel" class="vt-subpanel">
                         <label class="vt-label">YOLO 模型</label>
                         <select id="yoloModel" class="vt-select"></select>
                     </div>
+                    <div id="vlmPanel" class="vt-subpanel" style="display:none;">
+                        <label class="vt-label">VLM 模型（vLLM 已加载）</label>
+                        <select id="vlmModel" class="vt-select"></select>
+                    </div>
 
                     <div id="sam3Panel" class="vt-subpanel" style="display:none;">
-                        <label class="vt-label">SAM3 目标类别</label>
+                        <label class="vt-label">目标类别（SAM3/VLM）</label>
                         <input type="text" id="sam3Classes" class="vt-input" placeholder="person,car,dog" value="person,car">
                     </div>
+                </div>
+
+                <div class="vt-group">
+                    <label class="vt-label">3. 任务模式</label>
+                    <div class="vt-engine">
+                        <label class="vt-radio"><input type="radio" name="taskMode" value="detect" checked> 普通检测</label>
+                        <label class="vt-radio"><input type="radio" name="taskMode" value="depth_track"> 跟踪+深度</label>
+                    </div>
+                    <div id="depthPanel" style="display:none;">
+                        <label class="vt-label">深度模型</label>
+                        <select id="depthModelSelect" class="vt-select"></select>
+                        <label class="vt-check" style="margin-top:6px; display:flex; align-items:center; gap:6px;">
+                            <input type="checkbox" id="showMetersToggle" checked> 米数显示（仅绝对深度模型）
+                        </label>
+                        <div class="vt-hint">相对深度模型不显示米数。</div>
+                    </div>
+                    <div class="vt-hint">跟踪+深度：为检测目标赋予稳定 ID，并叠加单目深度距离 (m) 与接近/远离速度 (km/h)。</div>
                 </div>
 
                 <div class="vt-group">

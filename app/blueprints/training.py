@@ -178,8 +178,13 @@ def train_start():
     if mode not in {"initial", "incremental"}:
         mode = "incremental"
 
+    # 深度蒸馏/伪标签不走检测标注就绪门槛（工单 05：同一队列，不同前置条件）
+    task_type = str(payload.get("task_type") or "detect").strip().lower()
+    if task_type not in {"detect", "pseudo", "depth"}:
+        return jsonify({"error": "task_type 必须是 detect/pseudo/depth"}), 400
+
     readiness = training_readiness()
-    if mode == "initial" and not readiness.get("ready_for_initial"):
+    if task_type == "detect" and mode == "initial" and not readiness.get("ready_for_initial"):
         return jsonify({"error": f"Need at least {readiness['min_for_initial']} annotated images for initial training", "readiness": readiness}), 400
 
     active = models_service.get_active_model()

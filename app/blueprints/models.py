@@ -12,6 +12,7 @@ from app.services.models_service import (
     get_active_model,
     list_installed_models,
     ModelFileMissingError,
+    ModelNotActivatableError,
     ModelNotFoundError,
     read_install_info,
     read_model_registry,
@@ -140,4 +141,6 @@ def model_activate(model_id):
         return jsonify({"error": "model not found"}), 404
     except ModelFileMissingError:
         return jsonify({"error": "model file does not exist"}), 400
+    except ModelNotActivatableError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"message": "model activated", "active": get_active_model()})

@@ -56,6 +56,13 @@ class ModelFileMissingError(ValueError):
     """
 
 
+class ModelNotActivatableError(ValueError):
+    """Raised by :func:`activate_model` for kind=depth records (工单 06).
+
+    深度模型不是检测生产模型，激活会静默破坏标注流程。Blueprint maps to 400.
+    """
+
+
 def _resolve_install_path(install_path):
     """Make install_path absolute and verify it stays under PATHS['root'].
 
@@ -141,7 +148,13 @@ def next_model_version(mode: str) -> str:
     return _next_version_for(read_model_registry(), mode)
 
 
-def register_trained_model_record(mode: str, base_record: dict, temp_weights_path: str) -> tuple[str, str, str]:
+def list_models_by_kind(kind: str) -> list[dict]:
+    """Registry records filtered by ``kind`` (工单 05：detect/depth 共用一份注册表)."""
+    return [m for m in read_model_registry() if m.get("kind") == kind]
+
+
+def register_trained_model_record(mode: str, base_record: dict, temp_weights_path: str,
+                                  subdir: str = "") -> tuple[str, str, str]:
     """Atomically reserve a model version + append its registry record (H6).
 
     Computes the next version from the CURRENT registry, renames
@@ -159,12 +172,13 @@ def register_trained_model_record(mode: str, base_record: dict, temp_weights_pat
 
     def _mutator(models):
         version = _next_version_for(models, mode)
-        model_filename = f"{version}.pt"
-        model_dst = os.path.join(models_dir, model_filename)
+        rel_name = os.path.join(subdir, f"{version}.pt") if subdir else f"{version}.pt"
+        model_dst = os.path.join(models_dir, rel_name)
+        os.makedirs(os.path.dirname(model_dst), exist_ok=True)
         os.replace(temp_weights_path, model_dst)
-        record = {**base_record, "version": version, "name": model_filename, "path": model_dst}
+        record = {**base_record, "version": version, "name": rel_name, "path": model_dst}
         models.append(record)
-        return models, (version, model_filename, model_dst)
+        return models, (version, rel_name, model_dst)
 
     return update_model_registry(_mutator)
 
@@ -186,6 +200,9 @@ def activate_model(model_id: str) -> dict:
         target = next((m for m in models if m.get("id") == model_id), None)
         if target is None:
             raise ModelNotFoundError("模型不存在")
+        if target.get("kind") == "depth":
+            # 深度模型不是检测生产模型：激活会静默破坏标注流程
+            raise ModelNotActivatableError("深度模型不能设为检测生产模型")
         if not os.path.exists(target.get("path", "")):
             raise ModelFileMissingError("模型文件不存在")
         for m in models:

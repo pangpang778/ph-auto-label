@@ -14,6 +14,11 @@
         uploadMsg: $('uploadMsg'),
         yoloPanel: $('yoloPanel'),
         sam3Panel: $('sam3Panel'),
+        vlmPanel: $('vlmPanel'),
+        vlmModel: $('vlmModel'),
+        depthPanel: $('depthPanel'),
+        depthModelSelect: $('depthModelSelect'),
+        showMetersToggle: $('showMetersToggle'),
         yoloModel: $('yoloModel'),
         sam3Classes: $('sam3Classes'),
         confRange: $('confRange'),
@@ -37,6 +42,7 @@
     let currentJobId = null;
     let eventSource = null;
     let syncing = false;
+    let jobRunning = false;
 
     const allVideos = () => [els.origVideo, els.origVideoB, els.aiVideo, els.aiVideoB].filter(Boolean);
     const secondaryVideos = () => [els.origVideoB, els.aiVideo, els.aiVideoB].filter(Boolean);
@@ -156,14 +162,94 @@
     function updateEnginePanel() {
         const engine = document.querySelector('input[name="engine"]:checked').value;
         els.yoloPanel.style.display = engine === 'yolo' ? '' : 'none';
-        els.sam3Panel.style.display = engine === 'sam3' ? '' : 'none';
+        els.sam3Panel.style.display = (engine === 'sam3' || engine === 'vlm') ? '' : 'none';
+        els.vlmPanel.style.display = engine === 'vlm' ? '' : 'none';
+        if (engine === 'vlm' && !els.vlmModel.options.length) loadVlmModels();
+    }
+
+    async function loadVlmModels() {
+        try {
+            const response = await fetch('/api/vlm/models');
+            const data = await response.json();
+            const models = data.models || [];
+            els.vlmModel.innerHTML = '';
+            if (!models.length) {
+                els.vlmModel.innerHTML = '<option value="">-- VLM 服务未启动或无可用模型 --</option>';
+                return;
+            }
+            models.forEach((m) => {
+                const option = document.createElement('option');
+                option.value = m.id;
+                option.textContent = m.label;
+                els.vlmModel.appendChild(option);
+            });
+            const available = models.find((m) => m.available);
+            if (available) els.vlmModel.value = available.id;
+        } catch (error) {
+            els.vlmModel.innerHTML = '<option value="">-- VLM 服务未启动或无可用模型 --</option>';
+        }
+    }
+
+    let depthModels = [];
+
+    async function loadDepthModels() {
+        try {
+            const response = await fetch('/api/video-test/depth-models');
+            const data = await response.json();
+            depthModels = data.models || [];
+            els.depthModelSelect.innerHTML = '';
+            depthModels.forEach((m) => {
+                const option = document.createElement('option');
+                option.value = m.id;
+                option.textContent = m.label;
+                option.dataset.metric = m.metric ? '1' : '';
+                els.depthModelSelect.appendChild(option);
+            });
+            syncMetersToggle();
+        } catch (error) {
+            els.depthModelSelect.innerHTML = '<option value="depth_anything_v2_small">Depth Anything v2 Small</option>';
+        }
+    }
+
+    function currentDepthMetric() {
+        const option = els.depthModelSelect.selectedOptions[0];
+        return !!(option && option.dataset.metric);
+    }
+
+    // 相对深度模型无米可显：开关禁用（工单 06）
+    function syncMetersToggle() {
+        if (!els.showMetersToggle) return;
+        els.showMetersToggle.disabled = !currentDepthMetric();
+        if (!currentDepthMetric()) els.showMetersToggle.checked = false;
+    }
+
+    function updateDepthPanel() {
+        const modeEl = document.querySelector('input[name="taskMode"]:checked');
+        const isDepth = modeEl && modeEl.value === 'depth_track';
+        els.depthPanel.style.display = isDepth ? '' : 'none';
     }
 
     document.querySelectorAll('input[name="engine"]').forEach((radio) => radio.addEventListener('change', updateEnginePanel));
+    document.querySelectorAll('input[name="taskMode"]').forEach((radio) => radio.addEventListener('change', updateDepthPanel));
+    els.depthModelSelect?.addEventListener('change', syncMetersToggle);
     els.confRange?.addEventListener('input', () => { els.confVal.textContent = els.confRange.value; });
     els.volumeRange?.addEventListener('input', updateVolume);
     els.quadPlayBtn?.addEventListener('click', toggleQuadPlayback);
-    els.startBtn?.addEventListener('click', startInference);
+    els.startBtn?.addEventListener('click', () => {
+        if (jobRunning) stopInference();
+        else startInference();
+    });
+
+    function setRunButton(running, disabled = false) {
+        jobRunning = running;
+        if (!els.startBtn) return;
+        els.startBtn.disabled = disabled;
+        els.startBtn.classList.toggle('btn-success', !running);
+        els.startBtn.classList.toggle('btn-danger', running);
+        els.startBtn.innerHTML = running
+            ? '<i class="fas fa-stop"></i> 停止推理'
+            : '<i class="fas fa-play"></i> 开始全帧推理';
+    }
 
     function updateVolume() {
         if (!els.volumeRange || !els.origVideo) return;
@@ -174,18 +260,27 @@
 
     function startInference() {
         const engine = document.querySelector('input[name="engine"]:checked').value;
+        const modeEl = document.querySelector('input[name="taskMode"]:checked');
+        const mode = modeEl ? modeEl.value : 'detect';
         const videoName = els.videoSelect.value;
         if (!videoName) { alert('请先选择视频'); return; }
 
-        const body = { video_name: videoName, engine, confidence: parseFloat(els.confRange.value) };
+        const body = { video_name: videoName, engine, mode, confidence: parseFloat(els.confRange.value) };
         if (engine === 'yolo') {
             body.model = els.yoloModel.value || 'yolo11n.pt';
-        } else {
+        } else if (engine === 'vlm') {
+            body.vlm_model = els.vlmModel.value || undefined;
             body.classes = els.sam3Classes.value;
-            if (!body.classes.trim()) { alert('请填写 SAM3 目标类别'); return; }
+            if (!body.classes.trim()) { alert('请填写目标类别'); return; }
+        } else if (engine === 'sam3') {
+            body.classes = els.sam3Classes.value;
+        }
+        if (mode === 'depth_track' && els.depthModelSelect?.value) {
+            body.depth_model = els.depthModelSelect.value;
+            body.show_meters = els.showMetersToggle ? !!els.showMetersToggle.checked : true;
         }
 
-        els.startBtn.disabled = true;
+        setRunButton(false, true);
         els.statusArea.style.display = '';
         els.statusArea.classList.remove('error', 'done');
         setProgress(0, '提交任务...');
@@ -201,11 +296,30 @@
             if (data.error) throw new Error(data.error);
             currentJobId = data.job_id;
             saveJob(data.job_id);
+            setRunButton(true);
             openStream(data.job_id);
         }).catch((error) => {
             setProgress(0, '✗ ' + error.message, true);
-            els.startBtn.disabled = false;
+            setRunButton(false);
             els.aiBadge.textContent = '失败';
+        });
+    }
+
+    function stopInference() {
+        if (!currentJobId) {
+            setRunButton(false);
+            return;
+        }
+        setRunButton(true, true);
+        setProgress(0, '正在停止推理...');
+        fetch(`/api/video-test/job/${encodeURIComponent(currentJobId)}/stop`, {
+            method: 'POST',
+        }).then((response) => response.json()).then((data) => {
+            if (data.error) throw new Error(data.error);
+            if (data.status === 'stopped') handleProgress(data);
+        }).catch((error) => {
+            setRunButton(true);
+            setProgress(0, '停止失败: ' + error.message, true);
         });
     }
 
@@ -226,14 +340,23 @@
             closeStream();
             els.statusArea.classList.add('done');
             setProgress(100, data.message || '完成');
-            els.startBtn.disabled = false;
+            setRunButton(false);
             if (data.ai_video_url) {
                 setAiVideoSources(data.ai_video_url);
             }
+        } else if (data.status === 'stopping') {
+            setRunButton(true, true);
+        } else if (data.status === 'stopped') {
+            closeStream();
+            clearJob();
+            currentJobId = null;
+            setRunButton(false);
+            els.aiBadge.textContent = '已停止';
+            setProgress(data.progress || 0, data.message || '已停止推理');
         } else if (data.status === 'failed') {
             closeStream();
             els.statusArea.classList.add('error');
-            els.startBtn.disabled = false;
+            setRunButton(false);
             els.aiBadge.textContent = '失败';
             setProgress(data.progress || 0, '✗ ' + (data.error || data.message || '失败'), true);
         }
@@ -252,7 +375,16 @@
     async function checkJobOnce(jobId) {
         try {
             const response = await fetch(`/api/video-test/job/${jobId}`);
-            if (response.ok) handleProgress(await response.json());
+            if (!response.ok) {
+                if (currentJobId === jobId) {
+                    closeStream();
+                    clearJob();
+                    currentJobId = null;
+                    setRunButton(false);
+                }
+                return;
+            }
+            handleProgress(await response.json());
         } catch {}
     }
 
@@ -275,15 +407,20 @@
         let data;
         try {
             const response = await fetch(`/api/video-test/job/${saved.job_id}`);
-            if (!response.ok) { clearJob(); return; }
+            if (!response.ok) {
+                clearJob();
+                currentJobId = null;
+                setRunButton(false);
+                return;
+            }
             data = await response.json();
         } catch { clearJob(); return; }
         if (!data || data.error || !data.status) { clearJob(); return; }
 
         currentJobId = saved.job_id;
         els.statusArea.style.display = '';
-        if (data.status === 'running' || data.status === 'queued') {
-            els.startBtn.disabled = true;
+        if (data.status === 'running' || data.status === 'queued' || data.status === 'stopping') {
+            setRunButton(true, data.status === 'stopping');
             els.aiBadge.textContent = '推理中';
             setProgress(data.progress || 0, data.message || '恢复进度...');
             openStream(saved.job_id);
@@ -295,6 +432,12 @@
             els.statusArea.classList.add('error');
             els.aiBadge.textContent = '失败';
             setProgress(data.progress || 0, '✗ ' + (data.error || '失败'), true);
+        } else if (data.status === 'stopped') {
+            clearJob();
+            currentJobId = null;
+            setRunButton(false);
+            els.aiBadge.textContent = '已停止';
+            setProgress(data.progress || 0, data.message || '已停止推理');
         }
     }
 
@@ -349,8 +492,11 @@
     (async function init() {
         updateEnginePanel();
         updateVolume();
+        updateDepthPanel();
         await loadVideos();
         await loadYoloModels();
+        await loadDepthModels();
+        loadVlmModels();
         const savedVideo = localStorage.getItem(VIDEO_KEY);
         const options = [...els.videoSelect.options].map((option) => option.value).filter(Boolean);
         const target = (savedVideo && options.includes(savedVideo)) ? savedVideo : options[0];

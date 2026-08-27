@@ -1,0 +1,26 @@
+# LocateAnything-3B 官方混合解码服务（transformers + batch_utils Fast/Hybrid）。
+# 替代 SGLang 的 ph-la（同容器名/同端口，vlm_service 编排无需改动）。
+# 8GB 显存与 ph-vlm 互斥：切换由 plugins/vlm_service.ensure_backend 自动处理。
+services:
+  la:
+    build:
+      context: .
+      dockerfile: Dockerfile.la-hybrid
+    image: la-hybrid:local
+    container_name: ph-la
+    environment:
+      - HF_HUB_OFFLINE=1
+      - LA_FLASH_MODEL=nvidia/LocateAnything-3B
+      - LA_FLASH_ATTN=sdpa
+    volumes:
+      - "C:/Users/Administrator/.cache/huggingface:/root/.cache/huggingface"
+    ports:
+      - "127.0.0.1:${LA_PORT:-8002}:30000"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -25,6 +25,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from plugins.yolo_depth.depth_models import (  # noqa: E402
+    DEFAULT_DEPTH_MODEL,
+    create_depth_estimator,
+)
+from plugins.yolo_depth.detector import Sam3Detector, YoloTrackDetector  # noqa: E402
+from plugins.yolo_depth.estimator import VehicleDepthEstimator  # noqa: E402
+from plugins.yolo_depth.pipeline import DepthTrackingPipeline  # noqa: E402
+from plugins.yolo_depth.text_cn import put_text_cn  # noqa: E402
+from plugins.yolo_depth.tracker import ByteTrackTracker  # noqa: E402
+
 logger = logging.getLogger("video-inference")
 
 # 视频素材目录
@@ -35,22 +45,11 @@ os.makedirs(STATIC_VIDEO_DIR, exist_ok=True)
 
 VIDEO_EXT = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
 
-# 类别配色（与 app.py color_for_index 风格一致）
-_PALETTE = [
-    "#3aa757", "#4c9ffd", "#ff9d00", "#dc3545", "#6f42c1",
-    "#20c997", "#fd7e14", "#17a2b8", "#e83e8c", "#6610f2",
-]
-
-
-def _hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-    return (b, g, r)  # cv2 用 BGR
-
 
 def _color_for_class(name: str) -> Tuple[int, int, int]:
-    idx = abs(hash(name)) % len(_PALETTE)
-    return _hex_to_bgr(_PALETTE[idx])
+    """Shared stable md5-based BGR color (single source of truth)."""
+    from plugins.yolo_depth.text_cn import color_for_label
+    return color_for_label(name)
 
 
 def probe_video(video_path: str) -> Dict[str, Any]:
@@ -69,6 +68,7 @@ def probe_video(video_path: str) -> Dict[str, Any]:
 
     width = int(vstream["width"])
     height = int(vstream["height"])
+    has_audio = any(s.get("codec_type") == "audio" for s in probe.get("streams", []))
     fps = 30.0
     rfr = vstream.get("r_frame_rate") or "30/1"
     try:
@@ -85,26 +85,49 @@ def probe_video(video_path: str) -> Dict[str, Any]:
     if (not total_frames) and duration and fps:
         total_frames = int(duration * fps)
     return {"width": width, "height": height, "fps": round(fps, 3),
-            "total_frames": total_frames, "duration": round(duration, 3)}
+            "total_frames": total_frames, "duration": round(duration, 3),
+            "has_audio": has_audio}
 
 
-def build_encode_command(video_path: str, width: int, height: int, fps: float, output_path: str) -> List[str]:
-    return [
+def build_encode_command(video_path: str, width: int, height: int, fps: float, output_path: str,
+                         has_audio: bool = True) -> List[str]:
+    """构造编码命令。源无音轨时不 map 音频，否则 ffmpeg 会因找不到 1:a:0 失败。"""
+    cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-s", f"{width}x{height}", "-r", str(fps),
         "-i", "pipe:0",
         "-i", video_path,
         "-map", "0:v:0",
-        "-map", "1:a:0",
+    ]
+    if has_audio:
+        cmd += ["-map", "1:a:0", "-c:a", "copy"]
+    cmd += [
         "-c:v", "libx264",
-        "-c:a", "copy",
         "-pix_fmt", "yuv420p",
         "-preset", "fast", "-crf", "23",
         "-shortest",
         "-v", "quiet",
         output_path,
     ]
+    return cmd
+
+
+def build_decode_cmd(video_path: str, stride: int) -> List[str]:
+    """raw bgr24 decoder for offline jobs.
+
+    stride>1 decodes only sampled frames (-vf select); -fps_mode vfr stops
+    ffmpeg from duplicating dropped frames back to constant fps. The
+    command MUST end with the "pipe:1" output target or ffmpeg exits
+    immediately.
+    """
+    cmd = ["ffmpeg", "-i", video_path, "-f", "rawvideo",
+           "-pix_fmt", "bgr24", "-v", "quiet"]
+    if stride > 1:
+        cmd += ["-vf", rf"select=not(mod(n\,{stride}))",
+                "-fps_mode", "vfr"]
+    cmd += ["pipe:1"]
+    return cmd
 
 
 def _drain_stderr(proc: subprocess.Popen, sink: Optional[List[str]] = None) -> threading.Thread:
@@ -126,10 +149,17 @@ class VideoInferenceService:
 
     def __init__(self) -> None:
         self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._job_stop_flags: Dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         # YOLO 模型缓存 {model_path: YOLO}
         self._yolo_cache: Dict[str, Any] = {}
         self._yolo_lock = threading.Lock()
+        # 深度估计器按模型 id 缓存（内置 2 + 自训练 N）
+        self._depth_estimator: Optional[Any] = None
+        self._depth_estimators_by_id: Dict[str, Any] = {}
+        self._depth_lock = threading.Lock()
+        # 深度跟踪管线按 job/session 缓存 {key: (detector, tracker, depth, est)}
+        self._dt_pipelines: Dict[str, Tuple[Any, Any, Any, Any]] = {}
         # 流式 MJPEG 会话 {session_id: {...}}
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -142,6 +172,12 @@ class VideoInferenceService:
         classes: Optional[List[str]] = None,
         target_fps: int = 2,
         conf: float = 0.35,
+        mode: str = "detect",
+        depth_model: Optional[str] = None,
+        weights_path: Optional[str] = None,
+        depth_metric: bool = True,
+        show_meters: bool = True,
+        vlm_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         job_id = f"vjob_{uuid.uuid4().hex[:10]}"
         job = {
@@ -150,10 +186,16 @@ class VideoInferenceService:
             "progress": 0,
             "message": "排队中...",
             "engine": engine,
+            "mode": mode,
             "model_path": model_path,
             "classes": classes or [],
             "target_fps": target_fps,
             "conf": conf,
+            "depth_model": depth_model or DEFAULT_DEPTH_MODEL,
+            "weights_path": weights_path,
+            "depth_metric": bool(depth_metric),
+            "show_meters": bool(show_meters),
+            "vlm_model": vlm_model,
             "video_path": video_path,
             "ai_video": None,
             "ai_video_url": None,
@@ -166,6 +208,7 @@ class VideoInferenceService:
         }
         with self._lock:
             self._jobs[job_id] = job
+            self._job_stop_flags[job_id] = threading.Event()
         t = threading.Thread(target=self._run, args=(job_id,), daemon=True)
         t.start()
         return job
@@ -173,6 +216,21 @@ class VideoInferenceService:
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             return dict(self._jobs.get(job_id)) if job_id in self._jobs else None
+
+    def stop_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Request a running offline job to stop after the current frame."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            stop_flag = self._job_stop_flags.get(job_id)
+            if job is None:
+                return None
+            if job.get("status") in ("completed", "failed", "stopped"):
+                return {"stopped": False, "status": job["status"]}
+            if stop_flag is not None:
+                stop_flag.set()
+            job["status"] = "stopping"
+            job["message"] = "正在停止推理..."
+            return {"stopped": True, "status": "stopping"}
 
     def stream_progress(self, job_id: str):
         """SSE 生成器：周期读取 job 状态并推送，直到 terminal。"""
@@ -191,7 +249,7 @@ class VideoInferenceService:
                 "total_frames": job["total_frames"],
                 "eta_seconds": job["eta_seconds"],
             }
-            if job["status"] in ("completed", "failed"):
+            if job["status"] in ("completed", "failed", "stopped"):
                 payload["ai_video_url"] = job.get("ai_video_url")
                 payload["error"] = job.get("error")
                 yield _sse(payload)
@@ -213,10 +271,15 @@ class VideoInferenceService:
     # ---------- 推理主循环 ----------
     def _run(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
-        if job is None:
+        stop_flag = self._job_stop_flags.get(job_id)
+        if job is None or stop_flag is None:
             return
         try:
             self._set(job_id, status="running", message="读取视频信息...")
+            if stop_flag.is_set():
+                self._set(job_id, status="stopped", completed_at=time.time(),
+                          message="已停止推理")
+                return
 
             video_path = job["video_path"]
             if not os.path.isfile(video_path):
@@ -226,10 +289,14 @@ class VideoInferenceService:
             width, height = info["width"], info["height"]
             src_fps = info["fps"] or 30.0
             total_src = info["total_frames"]
-            stride = 1  # 每帧都推理（全帧处理，不抽帧）
+            # ponytail: VLM 逐帧推理秒级耗时，按目标帧率抽帧；YOLO/SAM3 保持全帧
+            if (job.get("engine") or "detect") == "vlm":
+                stride = max(1, round(src_fps / max(int(job.get("target_fps") or 5), 1)))
+            else:
+                stride = 1
 
             # 预估要处理的帧数
-            est_frames = total_src if total_src else 0
+            est_frames = (total_src // stride if total_src else 0) or total_src
             self._set(job_id, total_frames=est_frames, message=f"开始推理 {info['width']}x{info['height']} {src_fps}fps, 全帧推理 {est_frames or '?'} 帧")
 
             out_name = f"ai_{job_id}.mp4"
@@ -240,9 +307,8 @@ class VideoInferenceService:
             if engine == "yolo":
                 yolo_model = self._get_yolo(job["model_path"])
 
-            # ffmpeg 解码：raw bgr24
-            decode_cmd = ["ffmpeg", "-i", video_path, "-f", "rawvideo",
-                          "-pix_fmt", "bgr24", "-v", "quiet", "pipe:1"]
+            decode_cmd = build_decode_cmd(video_path, stride)
+
             encode_err: List[str] = []
             decode_proc = None
             encode_proc = None
@@ -252,7 +318,10 @@ class VideoInferenceService:
                 decode_proc = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 decode_thread = _drain_stderr(decode_proc)
 
-                encode_cmd = build_encode_command(video_path, width, height, src_fps, out_path)
+                # VLM 抽帧(stride>1)时按有效输出帧率编码，否则 AI 视频被时间压缩
+                out_fps = src_fps / stride if stride > 1 else src_fps
+                encode_cmd = build_encode_command(video_path, width, height, out_fps, out_path,
+                                      has_audio=info.get("has_audio", True))
                 encode_proc = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
                 encode_thread = _drain_stderr(encode_proc, encode_err)
 
@@ -262,32 +331,35 @@ class VideoInferenceService:
                 total_dets = 0
                 t0 = time.time()
 
-                while True:
+                while not stop_flag.is_set():
                     raw = decode_proc.stdout.read(frame_size)
                     if len(raw) != frame_size:
                         break
                     frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
                     frame = np.array(frame, dtype=np.uint8)  # 可写拷贝
 
-                    if frame_idx % stride == 0:
-                        dets = self._infer_frame(job, frame, yolo_model)
-                        total_dets += len(dets)
-                        frame = self._draw(frame, dets)
-                        processed += 1
+                    # stride==1 processes every decoded frame; stride>1 uses the select
+                    # filter, so every frame received here is already a sampled one.
+                    src_idx = frame_idx * stride if stride > 1 else frame_idx
+                    t_sec = (src_idx / src_fps) if src_fps else 0.0
+                    dets = self._infer_frame(job, frame, yolo_model, t_sec)
+                    total_dets += len(dets)
+                    frame = self._draw(frame, dets)
+                    processed += 1
 
-                        encode_proc.stdin.write(frame.tobytes())
+                    encode_proc.stdin.write(frame.tobytes())
 
-                        # 更新进度
-                        if est_frames:
-                            prog = min(99.0, processed / est_frames * 100)
-                            elapsed = time.time() - t0
-                            eta = (elapsed / processed * (est_frames - processed)) if processed else None
-                            self._set(
-                                job_id, progress=round(prog, 1),
-                                processed_frames=processed,
-                                eta_seconds=(round(eta, 1) if eta else None),
-                                message=f"已处理 {processed}/{est_frames} 帧, 累计 {total_dets} 个目标",
-                            )
+                    # 更新进度
+                    if est_frames:
+                        prog = min(99.0, processed / est_frames * 100)
+                        elapsed = time.time() - t0
+                        eta = (elapsed / processed * (est_frames - processed)) if processed else None
+                        self._set(
+                            job_id, progress=round(prog, 1),
+                            processed_frames=processed,
+                            eta_seconds=(round(eta, 1) if eta else None),
+                            message=f"已处理 {processed}/{est_frames} 帧, 累计 {total_dets} 个目标",
+                        )
                     frame_idx += 1
 
                 # 刷新并关闭编码输入，确保所有帧落盘
@@ -330,6 +402,18 @@ class VideoInferenceService:
                         err = "".join(encode_err).strip()[:500]
                         raise RuntimeError(f"ffmpeg 编码失败: {err}")
 
+            if stop_flag.is_set():
+                try:
+                    if os.path.isfile(out_path):
+                        os.remove(out_path)
+                except OSError:
+                    logger.warning("unable to remove partial video for stopped job %s", job_id)
+                self._set(
+                    job_id, status="stopped", completed_at=time.time(), eta_seconds=None,
+                    message=f"已停止推理: 处理 {processed}/{est_frames} 帧",
+                )
+                return
+
             if not os.path.isfile(out_path) or os.path.getsize(out_path) < 1024:
                 raise RuntimeError("AI 视频未生成或为空")
 
@@ -344,22 +428,77 @@ class VideoInferenceService:
             logger.info(f"video job {job_id} done: {processed} frames, {total_dets} dets")
 
         except Exception as exc:
+            if stop_flag.is_set():
+                self._set(job_id, status="stopped", completed_at=time.time(), eta_seconds=None,
+                          message="已停止推理")
+                return
             logger.error(f"video job {job_id} failed: {exc}", exc_info=True)
             self._set(job_id, status="failed", error=str(exc),
                       completed_at=time.time(),
                       message=f"失败: {exc}")
 
     # ---------- 推理与绘制 ----------
-    def _infer_frame(self, job: Dict[str, Any], frame: np.ndarray, yolo_model) -> List[Dict[str, Any]]:
+    def _infer_frame(self, job: Dict[str, Any], frame: np.ndarray, yolo_model,
+                     t_sec: float = 0.0) -> List[Dict[str, Any]]:
         engine = job["engine"]
         conf = float(job["conf"])
+        mode = job.get("mode", "detect")
+        if mode == "depth_track":
+            return self._infer_depth_track(job, frame, yolo_model, conf, t_sec)
         if engine == "yolo":
             return self._infer_yolo(yolo_model, frame, conf)
         elif engine == "sam3":
             from plugins.sam3_service import sam3_service
             return sam3_service.detect_frame(frame, text=job["classes"], conf=conf)
+        elif engine == "vlm":
+            from plugins.vlm_service import vlm_service
+            return vlm_service.detect_frame(frame, text=job.get("classes"), conf=conf,
+                                            model=job.get("vlm_model"))
         raise ValueError(f"未知引擎: {engine}")
 
+    def _get_depth_estimator(self, depth_model: Optional[str] = None,
+                             weights_path: Optional[str] = None) -> Any:
+        """深度估计器按模型 id 缓存（内置 2 + 自训练 N）。"""
+        model_id = depth_model or DEFAULT_DEPTH_MODEL
+        with self._depth_lock:
+            cached = self._depth_estimators_by_id.get(model_id)
+            if cached is not None:
+                return cached
+        # 构造放在锁外（模型加载可能秒级），重复构造由幂等覆盖兜底
+        est = create_depth_estimator(model_id, weights_path=weights_path)
+        with self._depth_lock:
+            self._depth_estimators_by_id[model_id] = est
+        return est
+
+    def _get_depth_pipeline(self, key: str, engine: str, yolo_model: Any,
+                            classes: List[str], depth_model: Optional[str] = None,
+                            weights_path: Optional[str] = None) -> Tuple[Any, Any, Any, Any]:
+        """按 job/session 缓存深度跟踪管线组件，SAM3 的 ByteTrack 需跨帧保持状态。"""
+        cached = self._dt_pipelines.get(key)
+        if cached is not None:
+            return cached
+        if engine == "yolo":
+            detector = YoloTrackDetector(yolo_model)
+            tracker = None
+        else:  # sam3
+            from plugins.sam3_service import sam3_service
+            detector = Sam3Detector(sam3_service)
+            detector.set_classes(classes)
+            tracker = ByteTrackTracker()
+        depth_est = self._get_depth_estimator(depth_model, weights_path)
+        comps = (detector, tracker, depth_est, VehicleDepthEstimator())
+        self._dt_pipelines[key] = comps
+        return comps
+
+    def _infer_depth_track(self, job: Dict[str, Any], frame: np.ndarray, yolo_model: Any,
+                           conf: float, t_sec: float) -> List[Dict[str, Any]]:
+        """通用深度跟踪：Detector + ByteTrack -> 单目深度测距 -> Δd/Δt 测速。"""
+        detector, tracker, depth, est = self._get_depth_pipeline(
+            job["id"], job["engine"], yolo_model, job["classes"],
+            depth_model=job.get("depth_model"), weights_path=job.get("weights_path"))
+        pipeline = DepthTrackingPipeline(detector, tracker, depth, estimator=est)
+        show_dist = bool(job.get("depth_metric", True)) and bool(job.get("show_meters", True))
+        return pipeline.infer(frame, conf, t_sec, show_dist=show_dist)
     def _infer_yolo(self, model, frame: np.ndarray, conf: float) -> List[Dict[str, Any]]:
         results = model(frame, conf=conf, verbose=False)
         if not results:
@@ -384,6 +523,13 @@ class VideoInferenceService:
     def _draw(self, frame: np.ndarray, dets: List[Dict[str, Any]]) -> np.ndarray:
         for d in dets:
             x1, y1, x2, y2 = (int(v) for v in d["xyxy"])
+            vd_label = d.get("vd_label")
+            if vd_label is not None:
+                color = tuple(int(c) for c in d.get("vd_color", (0, 200, 255)))
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                put_text_cn(frame, vd_label, (x1, max(0, y1 - 22 - 12)),
+                            font_size=22, color=color, bg=(0, 0, 0))
+                continue
             color = _color_for_class(d["class"])
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             label = f"{d['class']} {d['conf']:.2f}"
@@ -403,6 +549,12 @@ class VideoInferenceService:
         classes: Optional[List[str]] = None,
         target_fps: int = 2,
         conf: float = 0.35,
+        mode: str = "detect",
+        depth_model: Optional[str] = None,
+        weights_path: Optional[str] = None,
+        depth_metric: bool = True,
+        show_meters: bool = True,
+        vlm_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         sid = f"vstr_{uuid.uuid4().hex[:10]}"
         session = {
@@ -413,6 +565,12 @@ class VideoInferenceService:
             "classes": classes or [],
             "target_fps": target_fps,
             "conf": conf,
+            "depth_model": depth_model or DEFAULT_DEPTH_MODEL,
+            "weights_path": weights_path,
+            "depth_metric": bool(depth_metric),
+            "show_meters": bool(show_meters),
+            "vlm_model": vlm_model,
+            "mode": mode,
             "stop_flag": threading.Event(),
             "status": "running",
             "current_time": 0.0,
@@ -490,9 +648,22 @@ class VideoInferenceService:
                     break
                 if idx % stride == 0:
                     try:
-                        if engine == "sam3":
+                        if session.get("mode") == "depth_track":
+                            pseudo = {"id": sid, "engine": engine, "classes": classes, "mode": "depth_track",
+                          "depth_model": session.get("depth_model"),
+                          "weights_path": session.get("weights_path"),
+                          "depth_metric": session.get("depth_metric", True),
+                          "show_meters": session.get("show_meters", True)}
+                            dets = self._infer_depth_track(
+                                pseudo, frame, yolo_model, conf,
+                                (idx / src_fps) if src_fps else 0.0)
+                        elif engine == "sam3":
                             from plugins.sam3_service import sam3_service
                             dets = sam3_service.detect_frame(frame, text=classes, conf=conf) if classes else []
+                        elif engine == "vlm":
+                            from plugins.vlm_service import vlm_service
+                            dets = vlm_service.detect_frame(frame, text=classes, conf=conf,
+                                                            model=session.get("vlm_model")) if classes else []
                         else:
                             dets = self._infer_yolo(yolo_model, frame, conf)
                     except Exception as exc:
@@ -513,6 +684,7 @@ class VideoInferenceService:
             session["error"] = str(exc)
             session["status"] = "failed"
         finally:
+            self._dt_pipelines.pop(sid, None)
             try:
                 cap.release()
             except Exception:
@@ -528,15 +700,18 @@ class VideoInferenceService:
                 self._yolo_cache[path] = YOLO(path)
             return self._yolo_cache[path]
 
-    # ---------- 内部 ----------
     def _set(self, job_id: str, **fields) -> None:
         with self._lock:
             if job_id in self._jobs:
                 self._jobs[job_id].update(fields)
+            # 终态任务清理管线缓存与停止标记，避免内存无限增长
+            if fields.get("status") in ("completed", "failed", "stopped"):
+                self._dt_pipelines.pop(job_id, None)
+                self._job_stop_flags.pop(job_id, None)
             # 终态任务超过上限时，淘汰最旧的已完成/失败任务，避免内存无限增长
-            if fields.get("status") in ("completed", "failed") and len(self._jobs) > 100:
+            if fields.get("status") in ("completed", "failed", "stopped") and len(self._jobs) > 100:
                 term = [(jid, j) for jid, j in self._jobs.items()
-                        if j.get("status") in ("completed", "failed")]
+                        if j.get("status") in ("completed", "failed", "stopped")]
                 term.sort(key=lambda kv: kv[1].get("completed_at") or 0)
                 for jid, _ in term[:max(0, len(term) - 100)]:
                     self._jobs.pop(jid, None)

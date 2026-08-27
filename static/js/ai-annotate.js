@@ -76,7 +76,7 @@ function onAiEngineChanged() {
     aiAnnotateEngine = engineSelect?.value || 'yolo11';
     const worldGroup = document.getElementById('worldClassesGroup');
     if (worldGroup) {
-        worldGroup.style.display = aiAnnotateEngine === 'sam3' ? 'block' : 'none';
+        worldGroup.style.display = (aiAnnotateEngine === 'sam3' || aiAnnotateEngine === 'vlm') ? 'block' : 'none';
     }
     const startBtn = document.getElementById('aiAnnotateStartBtn');
     if (startBtn) {
@@ -115,6 +115,36 @@ function loadAiModels() {
             })
             .catch(() => {
                 modelSelect.innerHTML = '<option value="">-- SAM3状态检查失败 --</option>';
+            });
+        return;
+    }
+
+    if (aiAnnotateEngine === 'vlm') {
+        fetch('/api/vlm/models')
+            .then(r => r.json())
+            .then(data => {
+                const models = data.models || [];
+                modelSelect.innerHTML = '';
+                if (!models.length) {
+                    modelSelect.innerHTML = '<option value="">-- VLM 服务未启动或无可用模型 --</option>';
+                    return;
+                }
+                models.forEach(m => {
+                    const option = document.createElement('option');
+                    option.value = m.id;
+                    option.textContent = m.label;
+                    modelSelect.appendChild(option);
+                });
+                const firstAvailable = models.find(x => x.available);
+                if (models.some(x => x.id === aiAnnotateModel && x.available)) {
+                    modelSelect.value = aiAnnotateModel;
+                } else if (firstAvailable) {
+                    modelSelect.value = firstAvailable.id;
+                    aiAnnotateModel = firstAvailable.id;
+                }
+            })
+            .catch(() => {
+                modelSelect.innerHTML = '<option value="">-- VLM 服务未启动或无可用模型 --</option>';
             });
         return;
     }

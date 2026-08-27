@@ -1,0 +1,32 @@
+# LocateAnything-3B 推理服务 — SGLang（AWS DLC 镜像，官方 smoke-tested 支持 LA）
+# 与 docker-compose.vlm.yml 二选一运行（8GB 显存互斥）。
+# 用法：
+#   停 Qwen：docker stop ph-vlm
+#   起 LA ：docker compose -f docker-compose.la.yml up -d
+#   切回  ：docker compose -f docker-compose.la.yml down && docker start ph-vlm
+services:
+  la:
+    image: sglang-la:local
+    container_name: ph-la
+    command: python3 -m sglang.launch_server --model-path nvidia/LocateAnything-3B
+      --trust-remote-code
+      --context-length 4096
+      --log-requests --log-requests-level 3
+      --host 0.0.0.0 --port 30000
+      --mem-fraction-static 0.80
+      --cpu-offload-gb 3
+    ports:
+      - "127.0.0.1:${LA_PORT:-8002}:30000"
+    environment:
+      # 权重走本地挂载缓存，离线加载
+      - HF_HUB_OFFLINE=1
+    volumes:
+      - "C:/Users/Administrator/.cache/huggingface:/root/.cache/huggingface"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
