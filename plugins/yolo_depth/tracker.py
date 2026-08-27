@@ -10,6 +10,23 @@ from ultralytics.trackers import BYTETracker
 logger = logging.getLogger(__name__)
 
 
+def _best_detection_index(box, detections: List[Dict[str, Any]]) -> int:
+    """Associate a tracker box with the input detection with highest IoU."""
+    x1, y1, x2, y2 = box
+    best_index, best_iou = 0, -1.0
+    for index, detection in enumerate(detections):
+        dx1, dy1, dx2, dy2 = detection["xyxy"]
+        ix1, iy1 = max(x1, dx1), max(y1, dy1)
+        ix2, iy2 = min(x2, dx2), min(y2, dy2)
+        intersection = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        union = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        union += max(0.0, dx2 - dx1) * max(0.0, dy2 - dy1) - intersection
+        iou = intersection / union if union else 0.0
+        if iou > best_iou:
+            best_index, best_iou = index, iou
+    return best_index
+
+
 class ByteTrackTracker:
     """基于独立 BYTETracker 的跟踪器，接受任意检测框输入。"""
 
@@ -79,18 +96,19 @@ class ByteTrackTracker:
         if tracked_rows.size == 0:
             return out
 
-        # BYTETracker.update row layout pinned to current ultralytics:
-        # [x1,y1,x2,y2, id, conf, cls, det_idx]; revisit on upgrade.
+        # Newer BYTETracker versions include det_idx; older Boxes-like outputs
+        # do not, so associate by IoU instead of silently choosing detections[0].
         IDX_ID, IDX_DET = 4, 7
         for row in tracked_rows:
             box = row[:4]
             tid = int(row[IDX_ID]) if len(row) > IDX_ID else -1
-            source_index = int(row[IDX_DET]) if len(row) > IDX_DET else -1
+            source_index = (int(row[IDX_DET]) if len(row) > IDX_DET
+                            else _best_detection_index(box, detections))
             if not (0 <= source_index < len(detections)):
                 logger.warning(
-                    "track row det_idx out of range (%s); attributing detections[0]",
+                    "track row det_idx out of range (%s); associating by IoU",
                     source_index)
-                source_index = 0
+                source_index = _best_detection_index(box, detections)
             source = detections[source_index]
             out.append({
                 "xyxy": [float(v) for v in box],

@@ -148,6 +148,41 @@ def test_bytetrack_tracker_accepts_detection_boxes():
 
 
 @pytest.mark.unit
+def test_bytetrack_tracker_associates_boxes_without_detection_index(monkeypatch):
+    class _Array:
+        def __init__(self, value):
+            self.value = np.asarray(value)
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.value
+
+    class _Boxes:
+        xyxy = _Array([[160, 20, 260, 120], [20, 20, 120, 120]])
+        id = _Array([2, 1])
+        conf = _Array([0.8, 0.9])
+        cls = _Array([0, 0])
+
+    class _Tracker:
+        def update(self, _results, _frame):
+            return type("Tracked", (), {"boxes": _Boxes()})()
+
+    tracker = ByteTrackTracker()
+    monkeypatch.setattr(tracker, "_get_tracker", lambda: _Tracker())
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    detections = [
+        {"xyxy": [20, 20, 120, 120], "conf": 0.9, "class": "person"},
+        {"xyxy": [160, 20, 260, 120], "conf": 0.8, "class": "car"},
+    ]
+
+    tracks = tracker.track(frame, detections)
+
+    assert [track["class"] for track in tracks] == ["car", "person"]
+
+
+@pytest.mark.unit
 def test_bytetrack_tracker_preserves_id_across_detection_gap():
     """空帧不重置 tracker：检测空窗后同一目标仍保持原 track_id。"""
     tracker = ByteTrackTracker()
