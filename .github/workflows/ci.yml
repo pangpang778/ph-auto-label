@@ -45,11 +45,13 @@ jobs:
   open-code-review:
     name: OpenCodeReview
     needs: lint-and-test
-    # Enable only after the repository LLM credentials have been configured.
+    # Review pull requests through the OpenRouter upstream used by
+    # OpenRouter-Ox-Alpha. The API key remains a repository secret.
     if: >-
       github.event_name == 'pull_request' &&
       vars.OCR_REVIEW_ENABLED == 'true' &&
-      !contains(github.event.pull_request.labels.*.name, 'trusted-ai-provider')
+      !contains(github.event.pull_request.labels.*.name, 'trusted-ai-provider') &&
+      github.event.pull_request.head.repo.id == github.repository_id
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -65,9 +67,9 @@ jobs:
         id: ocr
         uses: alibaba/open-code-review@66120291271b2e605e420e9f11fbd6448f06163f # v1.9.10
         with:
-          llm_url: https://ark.cn-beijing.volces.com/api/coding
-          llm_auth_token: ${{ secrets.GH_AW_ANTHROPIC_API_KEY }}
-          llm_model: ${{ vars.GH_AW_LLM_MODEL }}
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ secrets.OCR_LLM_MODEL }}
           llm_use_anthropic: 'true'
           llm_auth_header: x-api-key
           github_token: ${{ secrets.GITHUB_TOKEN }}
