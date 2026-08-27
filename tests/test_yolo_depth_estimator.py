@@ -87,6 +87,57 @@ def test_estimator_stationary_reports_slow_direction():
 
 
 @pytest.mark.unit
+def test_estimator_suppresses_depth_jitter_for_a_stationary_box():
+    est = VehicleDepthEstimator()
+    box = (100, 100, 160, 150)
+    noisy_depth = (30.0, 30.8, 29.5, 30.6, 29.7, 30.4, 29.8, 30.2)
+    for i, depth in enumerate(noisy_depth):
+        _, _, direction = est.update(1, i * 0.1, depth, xyxy=box)
+
+    assert direction == "静止/缓行"
+
+
+@pytest.mark.unit
+def test_estimator_uses_box_growth_when_depth_trend_has_the_wrong_sign():
+    est = VehicleDepthEstimator()
+    direction = ""
+    for i in range(10):
+        # The depth signal says "farther", but the image box grows steadily.
+        box = (100, 100, 150 + i * 7, 140 + i * 5)
+        _, _, direction = est.update(1, i * 0.1, 20.0 + i * 0.2, xyxy=box)
+
+    assert direction == "靠近"
+
+
+@pytest.mark.unit
+def test_estimator_uses_box_shrinkage_for_receding_direction():
+    est = VehicleDepthEstimator()
+    direction = ""
+    for i in range(10):
+        width = 120 - i * 7
+        height = 90 - i * 5
+        box = (100, 100, 100 + width, 100 + height)
+        # The depth signal says "closer", but the image box shrinks steadily.
+        _, _, direction = est.update(1, i * 0.1, 20.0 - i * 0.2, xyxy=box)
+
+    assert direction == "远离"
+
+
+@pytest.mark.unit
+def test_estimator_uses_downward_motion_when_box_is_clipped_at_frame_edge():
+    est = VehicleDepthEstimator()
+    direction = ""
+    for i in range(10):
+        # The box moves down strongly while its clipped size changes slightly.
+        box = (100, 100 + i * 10, 200 - i, min(720, 300 + i * 60))
+        _, _, direction = est.update(
+            1, i * 0.1, 20.0 + i * 0.2, xyxy=box, frame_shape=(720, 1280)
+        )
+
+    assert direction == "靠近"
+
+
+@pytest.mark.unit
 def test_estimator_none_distance_passthrough_no_state():
     est = VehicleDepthEstimator()
     est.update(1, 0.0, 5.0)
@@ -111,4 +162,5 @@ def test_estimator_tracks_two_ids_independently():
 def test_build_vd_label_format():
     label = build_vd_label(8, "car", 4.5, -18.0, "靠近")
     assert label == "ID8 car 4.5m 18km/h 靠近"
+    assert build_vd_label(8, "car", 4.5, None, "靠近") == "ID8 car 4.5m 靠近"
     assert build_vd_label(3, "bus", None, None, "") == "ID3 bus"

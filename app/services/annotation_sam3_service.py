@@ -174,7 +174,11 @@ def _merge_classes_for_batch(per_image):
 
 def _require_sam3_loaded():
     if not sam3_service.is_loaded:
-        raise AnnotationError(503, 'SAM3模型未加载，请检查模型文件')
+        # 被大模型挤掉后按需重载（load_model 内部会先停 VLM 容器腾显存）
+        try:
+            sam3_service.load_model()
+        except FileNotFoundError:
+            raise AnnotationError(503, 'SAM3模型未加载，请检查模型文件')
 
 
 def _collect_valid_image_paths(image_names):

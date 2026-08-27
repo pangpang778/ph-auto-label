@@ -63,12 +63,13 @@ jobs:
 
       - name: Review successful CI changes
         id: ocr
-        uses: alibaba/open-code-review@5b37b5f8e225f42e2cf410c550e400083df83610 # v1.9.2
+        uses: alibaba/open-code-review@66120291271b2e605e420e9f11fbd6448f06163f # v1.9.10
         with:
-          llm_url: ${{ secrets.OCR_LLM_URL }}
-          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
-          llm_model: ${{ secrets.OCR_LLM_MODEL }}
-          llm_use_anthropic: ${{ secrets.OCR_LLM_USE_ANTHROPIC }}
+          llm_url: https://ark.cn-beijing.volces.com/api/coding
+          llm_auth_token: ${{ secrets.GH_AW_ANTHROPIC_API_KEY }}
+          llm_model: ${{ vars.GH_AW_LLM_MODEL }}
+          llm_use_anthropic: 'true'
+          llm_auth_header: x-api-key
           github_token: ${{ secrets.GITHUB_TOKEN }}
           language: Chinese
           review_concurrency: '4'

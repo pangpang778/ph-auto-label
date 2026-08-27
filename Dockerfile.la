@@ -1,0 +1,2 @@
+FROM lmsysorg/sglang:latest
+RUN pip install --no-cache-dir decord lmdb peft

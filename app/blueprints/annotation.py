@@ -18,6 +18,7 @@ from app.services import (
     annotation_import_service,
     annotation_inference_service,
     annotation_sam3_service,
+    annotation_vlm_service,
     annotation_video_service,
 )
 from app.services.annotation_service import (
@@ -30,6 +31,7 @@ from app.services.annotation_service import (
     update_classes,
 )
 from plugins.sam3_service import sam3_service
+from plugins.vlm_service import vlm_service
 
 bp = Blueprint("annotation", __name__)
 
@@ -250,6 +252,46 @@ def ai_annotate_sam3_batch():
     except Exception:
         logger.exception("批量SAM3标注错误")
         return jsonify({'error': '批量SAM3标注失败'}), 500
+
+
+@bp.route('/api/vlm/status')
+def vlm_status():
+    """Check VLM (vLLM) service availability."""
+    return jsonify({
+        'available': vlm_service.is_available(),
+        'model': vlm_service.model,
+        'base_url': vlm_service.base_url,
+    })
+
+
+@bp.route('/api/vlm/models')
+def vlm_models():
+    """vLLM 已加载模型 id 列表（服务不可达时为空数组）。"""
+    return jsonify({"models": vlm_service.list_models()})
+
+
+@bp.route('/api/ai-annotate-vlm', methods=['POST'])
+def ai_annotate_vlm():
+    """Single-image auto annotation by VLM grounding."""
+    try:
+        return jsonify(annotation_vlm_service.run_vlm_single(request.json or {}))
+    except AnnotationError as exc:
+        return _annotation_error_response(exc)
+    except Exception:
+        logger.exception("VLM标注错误")
+        return jsonify({'error': 'VLM标注失败'}), 500
+
+
+@bp.route('/api/ai-annotate-vlm-batch', methods=['POST'])
+def ai_annotate_vlm_batch():
+    """Batch auto annotation by VLM grounding."""
+    try:
+        return jsonify(annotation_vlm_service.run_vlm_batch(request.json or {}))
+    except AnnotationError as exc:
+        return _annotation_error_response(exc)
+    except Exception:
+        logger.exception("批量VLM标注错误")
+        return jsonify({'error': '批量VLM标注失败'}), 500
 
 
 @bp.route('/api/export', methods=['POST'])

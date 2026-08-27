@@ -43,6 +43,11 @@ def _patch_video_externals(monkeypatch, job_id="job-xyz"):
         "get_job",
         lambda jid: {"id": jid, "status": "completed"} if jid == job_id else None,
     )
+    monkeypatch.setattr(
+        training_app.video_inference_service,
+        "stop_job",
+        lambda jid: {"stopped": True, "status": "stopping"} if jid == job_id else None,
+    )
     # Only "fake.mp4" resolves; any other name is treated as unknown (None).
     monkeypatch.setattr(
         "app.blueprints.video_test.resolve_video_path",
@@ -146,18 +151,18 @@ def test_video_test_start_rejects_unknown_video_with_400(isolated_app, monkeypat
 
 
 @pytest.mark.integration
-def test_video_test_start_vehicle_depth_returns_job_id(isolated_app, monkeypatch):
+def test_video_test_start_depth_track_returns_job_id(isolated_app, monkeypatch):
     # Arrange
     _patch_video_externals(monkeypatch)
     client = isolated_app.test_client()
 
-    # Act
+    # Act — YOLO detector + depth_track mode dispatched to the mocked launcher
     response = client.post(
         "/api/video-test/start",
-        json={"engine": "vehicle-depth", "target_fps": 2, "video_name": "fake.mp4"},
+        json={"engine": "yolo", "mode": "depth_track", "target_fps": 2, "video_name": "fake.mp4"},
     )
 
-    # Assert — engine accepted, job dispatched to the mocked launcher
+    # Assert
     assert response.status_code == 200
     body = response.get_json()
     assert body["job_id"] == "job-xyz"
@@ -165,24 +170,14 @@ def test_video_test_start_vehicle_depth_returns_job_id(isolated_app, monkeypatch
 
 
 @pytest.mark.integration
-def test_video_test_start_vehicle_depth_missing_weights_surfaces_503(isolated_app, monkeypatch):
-    # Arrange — force the weight check to fail; patch the blueprint's bound ref
+def test_video_test_stop_returns_stopping_state(isolated_app, monkeypatch):
     _patch_video_externals(monkeypatch)
-    monkeypatch.setattr(
-        "app.blueprints.video_test.vd_weights_ready",
-        lambda: (False, "车辆深度跟踪权重缺失: yolo26n-depth.pt"),
-    )
     client = isolated_app.test_client()
 
-    # Act
-    response = client.post(
-        "/api/video-test/start",
-        json={"engine": "vehicle-depth", "target_fps": 2, "video_name": "fake.mp4"},
-    )
+    response = client.post("/api/video-test/job/job-xyz/stop")
 
-    # Assert — missing weights -> 503 with a clear message
-    assert response.status_code == 503
-    assert "权重缺失" in response.get_json()["error"]
+    assert response.status_code == 200
+    assert response.get_json() == {"stopped": True, "status": "stopping"}
 
 
 @pytest.mark.integration

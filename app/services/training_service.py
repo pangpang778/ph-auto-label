@@ -20,6 +20,7 @@ import numpy as np
 from PIL import Image
 
 from app.common.config import PATHS
+from app.common.path_safety import PathSafetyError, resolve_contained_path
 from app.common.utils import now_iso
 from app.services.annotation_service import read_annotations, read_classes
 from app.repositories.train_jobs_repo import read_train_jobs, recover_orphaned_jobs_atomic, update_train_jobs, upsert_train_job
@@ -394,6 +395,11 @@ def build_train_job(payload, mode, readiness, active):
 
     Raises ``ValueError`` on invalid split_config (handler maps to 400).
     """
+    task_type = str(payload.get("task_type") or "detect").strip().lower()
+    if task_type == "pseudo":
+        return _build_pseudo_train_job(payload)
+    if task_type == "depth":
+        return _build_depth_train_job(payload)
     if payload.get("split_config"):
         split_config = normalize_split_config(payload.get("split_config"))
     else:
@@ -447,6 +453,82 @@ def build_train_job(payload, mode, readiness, active):
         except Exception:
             pass
     return job
+
+
+def _build_pseudo_train_job(payload):
+    """伪标签生成任务（工单 05）：选视频 → MoGe 打标 → frames+npy 数据集。"""
+    from plugins.video_inference import resolve_video_path
+    raw_videos = payload.get("videos")
+    if not isinstance(raw_videos, list) or not [v for v in raw_videos if str(v).strip()]:
+        raise ValueError("伪标签生成至少需要一个视频")
+    videos = []
+    for name in raw_videos:
+        name = str(name).strip()
+        if not name:
+            continue
+        path = resolve_video_path(name)
+        if not path:
+            raise ValueError(f"视频不存在: {name}")
+        videos.append({"name": name, "path": path})
+    interval = float(payload.get("interval_s", 0.2))
+    if not (0.05 <= interval <= 2.0):
+        raise ValueError("interval_s 必须在 0.05-2.0 秒之间")
+    job_id = f"train_{uuid.uuid4().hex[:10]}"
+    return {
+        "id": job_id,
+        "task_type": "pseudo",
+        "mode": "incremental",
+        "status": "queued",
+        "progress": 0,
+        "message": "Queued",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "videos": videos,
+        "interval_s": interval,
+        "epochs": 0,
+        "total_epochs": 0,
+        "log_path": os.path.join(PATHS['train_work'], job_id, "train.log"),
+        "log_tail": "",
+    }
+
+
+def _build_depth_train_job(payload):
+    """深度蒸馏训练任务（工单 05）：消费伪标签数据集目录。"""
+    dataset_dir = str(payload.get("dataset_dir") or "").strip()
+    if not dataset_dir:
+        raise ValueError("数据集目录不存在: (空)")
+    try:
+        # 客户端只能指向 train_work 下的伪标签产物（防任意服务器路径读取）
+        dataset_dir = resolve_contained_path(PATHS['train_work'], dataset_dir)
+    except PathSafetyError:
+        raise ValueError(f"数据集目录必须在 train_work 下: {dataset_dir}")
+    if not os.path.isdir(dataset_dir):
+        raise ValueError(f"数据集目录不存在: {dataset_dir}")
+    manifest = os.path.join(dataset_dir, "manifest.json")
+    if not os.path.isfile(manifest):
+        raise ValueError("所选目录缺少 manifest.json，请先完成伪标签生成任务")
+    epochs = _validate_int_param(payload.get("epochs", 50), "epochs", 1, 500)
+    batch = _validate_int_param(payload.get("batch", 32), "batch", 1, 64)
+    job_id = f"train_{uuid.uuid4().hex[:10]}"
+    return {
+        "id": job_id,
+        "task_type": "depth",
+        "mode": "incremental",
+        "status": "queued",
+        "progress": 0,
+        "message": "Queued",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "dataset_dir": dataset_dir,
+        "epochs": epochs,
+        "imgsz": 384,
+        "batch": batch,
+        "device": resolve_training_device(payload.get("device", "auto")),
+        "split_counts": {},
+        "total_epochs": epochs,
+        "log_path": os.path.join(PATHS['train_work'], job_id, "train.log"),
+        "log_tail": "",
+    }
 
 
 def _validate_int_param(raw, name: str, lo: int, hi: int) -> int:

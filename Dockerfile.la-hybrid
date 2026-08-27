@@ -1,0 +1,5 @@
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+RUN pip install --no-cache-dir transformers==4.57.1 accelerate huggingface_hub fastapi uvicorn pillow numpy pydantic opencv-python-headless decord lmdb einops scipy timm peft safetensors sentencepiece protobuf
+WORKDIR /app
+COPY la_hybrid_server.py .
+CMD ["python", "la_hybrid_server.py"]

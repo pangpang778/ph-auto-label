@@ -7,9 +7,17 @@ from werkzeug.utils import secure_filename
 
 from app.common.config import PATHS, VIDEO_EXTENSIONS
 from app.services.models_service import list_installed_models as models_service_list_installed_models
-from app.services.video_test_service import _parse_classes, get_active_model, get_models_dir, parse_video_test_params
+from app.services.models_service import list_models_by_kind
+from plugins.yolo_depth.depth_models import list_depth_models
+from app.services.video_test_service import (
+    _parse_classes,
+    get_active_model,
+    get_models_dir,
+    parse_video_test_params,
+    resolve_depth_model,
+)
 from plugins.sam3_service import sam3_service
-from plugins.video_inference import UPLOAD_VIDEO_DIR, list_available_videos, resolve_video_path, vd_weights_ready, video_inference_service
+from plugins.video_inference import UPLOAD_VIDEO_DIR, list_available_videos, resolve_video_path, video_inference_service
 
 bp = Blueprint("video_test", __name__)
 
@@ -71,6 +79,13 @@ def video_test_yolo_models():
     return jsonify({'models': models, 'active': preferred})
 
 
+@bp.route('/api/video-test/depth-models')
+def video_test_depth_models():
+    """深度模型下拉：内置 2 项 + 注册表 kind=depth 自训练条目（工单 06）。"""
+    registry_entries = list_models_by_kind("depth")
+    return jsonify({"models": list_depth_models(registry_entries)})
+
+
 def _dispatch_video_test(data, launcher):
     """Shared validation + launch for video-test start endpoints.
 
@@ -79,7 +94,8 @@ def _dispatch_video_test(data, launcher):
     dict on success, or a ``(jsonify_body, status)`` error tuple.
     """
     try:
-        name, engine, target_fps, conf = parse_video_test_params(data)
+        name, engine, mode, target_fps, conf = parse_video_test_params(data)
+        depth = resolve_depth_model(data)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
@@ -87,22 +103,34 @@ def _dispatch_video_test(data, launcher):
     if not path:
         return jsonify({'error': f'视频不存在: {name}'}), 400
 
+    extra = {}
+    if depth:
+        extra = {"depth_model": depth["id"], "weights_path": depth["weights_path"],
+                 "depth_metric": depth["metric"], "show_meters": depth["show_meters"]}
+
     if engine == 'sam3':
         if not sam3_service.is_loaded:
             return jsonify({'error': 'SAM3 模型未加载，请先确认模型已就绪'}), 503
         classes = _parse_classes(data.get('classes'))
         if not classes:
             return jsonify({'error': 'SAM3 需要填写目标类别(text)，如 person,car'}), 400
-        return launcher(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf)
+        return launcher(path, 'sam3', classes=classes, target_fps=target_fps, conf=conf, mode=mode,
+                        **extra)
 
-    if engine == 'vehicle-depth':
-        ok, err = vd_weights_ready()
-        if not ok:
-            return jsonify({'error': err}), 503
-        return launcher(path, 'vehicle-depth', target_fps=target_fps, conf=conf)
+    if engine == 'vlm':
+        from plugins.vlm_service import vlm_service as _vlm
+        if not _vlm.is_available():
+            return jsonify({'error': 'VLM 服务未就绪（docker compose -f docker-compose.vlm.yml up -d）'}), 503
+        classes = _parse_classes(data.get('classes'))
+        if not classes:
+            return jsonify({'error': 'VLM 需要填写目标类别(text)，如 person,car'}), 400
+        vlm_model = (data.get('vlm_model') or '').strip() or None
+        return launcher(path, 'vlm', classes=classes, target_fps=target_fps, conf=conf, mode=mode,
+                        vlm_model=vlm_model, **extra)
 
     model_path = data.get('model') or 'yolo11n.pt'
-    return launcher(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf)
+    return launcher(path, 'yolo', model_path=model_path, target_fps=target_fps, conf=conf, mode=mode,
+                    **extra)
 
 
 @bp.route('/api/video-test/start', methods=['POST'])
@@ -136,6 +164,14 @@ def video_test_job(job_id):
     if not job:
         return jsonify({'error': '任务不存在'}), 404
     return jsonify(job)
+
+
+@bp.route('/api/video-test/job/<job_id>/stop', methods=['POST'])
+def video_test_job_stop(job_id):
+    result = video_inference_service.stop_job(job_id)
+    if result is None:
+        return jsonify({'error': '任务不存在'}), 404
+    return jsonify(result)
 
 
 @bp.route('/api/video-test/stream/start', methods=['POST'])

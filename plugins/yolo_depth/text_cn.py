@@ -73,3 +73,11 @@ def put_text_cn(
     draw.text((padding - left, padding - top), text, font=font, fill=(color[2], color[1], color[0]))
     frame[y:y2, x:x2] = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
     return frame
+
+
+def color_for_label(label) -> tuple:
+    """Stable BGR tuple for any label (md5-based, cross-process consistent)."""
+    import hashlib
+    h = hashlib.md5(str(label).encode()).hexdigest()
+    # cv2 interprets tuples as BGR
+    return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))

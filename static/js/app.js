@@ -83,6 +83,7 @@ function setupEventListeners() {
     setupAiAnnotateEvents();
     setupTimelineEvents();
     setupTrainingCenterEvents();
+    if (typeof setupDepthTrainingEvents === 'function') setupDepthTrainingEvents();
     
     // 快捷键
     document.addEventListener('keydown', handleKeyDown);

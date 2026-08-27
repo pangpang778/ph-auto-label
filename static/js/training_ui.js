@@ -43,6 +43,9 @@ function loadTrainingCenter() {
             renderTrainReadiness(readiness);
             renderTrainSplit(splitData);
             renderTrainJobs(jobsData.jobs || []);
+            if (typeof refreshDepthDatasetOptions === 'function') {
+                refreshDepthDatasetOptions(jobsData.jobs || []);
+            }
             renderModelRegistry(modelsData.models || [], activeModel);
             renderActiveModel(activeModel);
             syncAiModelWithActive(activeModel);
@@ -66,22 +69,6 @@ function renderTrainReadiness(readiness) {
         <div>初代模型门槛：${minCount} 张</div>
         <div>初代训练状态：${ready ? '<span style="color:#28a745;">可开始</span>' : '<span style="color:#dc3545;">未达标</span>'}</div>
     `;
-    renderCudaStatus(readiness?.cuda || {});
-}
-
-function renderCudaStatus(cuda) {
-    const panel = document.getElementById('trainCudaStatus');
-    if (!panel) return;
-
-    const available = !!cuda.available;
-    const deviceName = cuda.device_name || '-';
-    const torchVersion = cuda.torch_version || '-';
-    const deviceCount = Number(cuda.device_count || 0);
-    const error = cuda.error ? `（${escapeHtml(cuda.error)}）` : '';
-
-    panel.innerHTML = available
-        ? `CUDA状态：<span style="color:#28a745;font-weight:600;">可用</span> | GPU: <strong>${escapeHtml(deviceName)}</strong> | 数量: ${deviceCount} | Torch: ${escapeHtml(torchVersion)}`
-        : `CUDA状态：<span style="color:#dc3545;font-weight:600;">不可用</span> | Torch: ${escapeHtml(torchVersion)} ${error}`;
 }
 
 function renderActiveModel(activeModel) {
