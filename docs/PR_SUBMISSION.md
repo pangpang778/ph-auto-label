@@ -162,7 +162,9 @@ OpenCodeReview 不是无条件门禁，只有同时满足以下条件才运行�
 
 ## 7. Issue 自动化
 
-当前 issue 自动化由 `ready-for-dev` 标签触发，不是 `ready-for-agent`。issue 必须包含以下非空章节：
+当前 issue 自动化使用 `ready-for-agent`，`ready-for-dev` 是旧标签，不再触发实现动作。完整 Issue 先经过 triage，再由受信任的实现工作流处理；`agent-running` 是执行锁，不是替代 PR 审查的标签。
+
+Issue 必须包含以下非空章节：
 
 - `Background`
 - `Goal`
@@ -171,7 +173,7 @@ OpenCodeReview 不是无条件门禁，只有同时满足以下条件才运行�
 - `Constraints`
 - `Verification`
 
-自动化只在验证成功后创建一个 draft PR，目标为 `master`，源分支前缀为 `feature/issue-`，并添加 `ai-generated` 标签。验证失败、缺少章节或涉及受保护文件时，自动化必须停止并转人工处理，不得创建或合并 PR。
+自动化只在验证成功后创建一个 draft PR，并添加 `ai-generated` 标签；PR 仍然必须从合规工作分支进入受保护的 `master`，由人工完成最终合并。PR 描述必须包含 `PH_AUTO_LABEL_TARGET: issue:<issue-number>` 关联标记。验证失败、缺少章节或涉及受保护文件时，自动化必须停止并转人工处理，不得创建或合并 PR。
 
 ## 8. 合并前检查
 
