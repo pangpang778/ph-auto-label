@@ -134,7 +134,7 @@ jobs:
             --tools "Read,Glob,Grep,Skill"
             --disallowedTools "mcp__*"
             --add-dir "${{ runner.temp }}"
-            --json-schema "${{ github.workspace }}/schema/triage-output.schema.json"
+            --json-schema={"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://ph-auto-label.local/schema/triage-output.schema.json","title":"Native Triage Output","type":"object","additionalProperties":false,"required":["category","state","reason","comment"],"properties":{"category":{"type":"string","enum":["bug","enhancement"]},"state":{"type":"string","enum":["needs-triage","needs-info","ready-for-agent","ready-for-human","wontfix"]},"reason":{"type":"string","maxLength":4000},"comment":{"type":"string","maxLength":12000}}}
           prompt: |
             /mattpocock-skills:engineering/triage
 
