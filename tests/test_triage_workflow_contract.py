@@ -63,7 +63,10 @@ def test_marketplace_catalog_is_pinned_and_loaded():
         "sha": PLUGIN_SHA,
     }
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "plugin_marketplaces: ${{ github.workspace }}" in text
+    # claude-code-action wants the marketplace inline; it must pin the same sha.
+    assert '"repo": "mattpocock/skills"' in text
+    assert PLUGIN_SHA in text
+    assert "plugin_marketplaces:" in text
     assert "plugins: mattpocock-skills@ph-auto-label" in text
 
 
