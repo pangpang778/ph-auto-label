@@ -47,6 +47,7 @@ jobs:
           python-version: "3.12"
       - id: decision
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRIAGE_WRITER_BOT_ID: ${{ vars.TRIAGE_WRITER_BOT_ID }}
         run: python scripts/triage_preflight.py
     outputs:
@@ -106,6 +107,7 @@ jobs:
       - name: Build trusted context
         id: context
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRIAGE_CONTEXT_DIR: ${{ runner.temp }}
           TARGET_TYPE: ${{ needs.preflight.outputs.target_type }}
           TARGET_NUMBER: ${{ needs.preflight.outputs.target_number }}
@@ -212,6 +214,7 @@ jobs:
         continue-on-error: true
       - name: Apply triage result
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TRIAGE_RESULT_PATH: ${{ github.workspace }}/result/triage-result.json
           TRIAGE_TARGET_TYPE: ${{ needs.preflight.outputs.target_type }}
           TRIAGE_TARGET_NUMBER: ${{ needs.preflight.outputs.target_number }}
