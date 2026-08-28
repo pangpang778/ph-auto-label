@@ -126,7 +126,17 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.GH_AW_ANTHROPIC_API_KEY }}
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          plugin_marketplaces: ${{ github.workspace }}/.claude-plugin/marketplace.json
+          plugin_marketplaces: |
+            [
+              {
+                "name": "ph-auto-label",
+                "source": {
+                  "source": "github",
+                  "repo": "mattpocock/skills",
+                  "sha": "6acc160e4e0cd062dbbbd7a1b26ae92855edf07e"
+                }
+              }
+            ]
           plugins: mattpocock-skills@ph-auto-label
           claude_args: >
             --tools "Read,Glob,Grep,Skill"
