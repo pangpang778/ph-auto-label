@@ -89,10 +89,12 @@ jobs:
           python - <<'PY'
           import json, pathlib, sys
           catalog = json.loads(pathlib.Path(".claude-plugin/marketplace.json").read_text())
-          entry = catalog["plugins"]["mattpocock-skills"]
+          entry = catalog["plugins"][0]
           src = entry["source"]
           ok = (
               catalog.get("name") == "ph-auto-label"
+              and isinstance(catalog.get("owner"), dict)
+              and entry.get("name") == "mattpocock-skills"
               and entry.get("version") == "1.2.3"
               and src.get("source") == "github"
               and src.get("repo") == "mattpocock/skills"

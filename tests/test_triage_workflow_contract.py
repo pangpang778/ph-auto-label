@@ -53,15 +53,15 @@ def test_marketplace_catalog_is_pinned_and_loaded():
     import json
 
     catalog = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
-    assert catalog["plugins"] == {
-        "mattpocock-skills": {
-            "version": "1.2.3",
-            "source": {
-                "source": "github",
-                "repo": "mattpocock/skills",
-                "sha": PLUGIN_SHA,
-            },
-        }
+    assert catalog["name"] == "ph-auto-label"
+    assert isinstance(catalog.get("owner"), dict)  # claude CLI requires owner
+    (entry,) = catalog["plugins"]
+    assert entry["name"] == "mattpocock-skills"
+    assert entry["version"] == "1.2.3"
+    assert entry["source"] == {
+        "source": "github",
+        "repo": "mattpocock/skills",
+        "sha": PLUGIN_SHA,
     }
     text = WORKFLOW.read_text(encoding="utf-8")
     # claude-code-action mounts the checked-out repo dir as a local marketplace.
