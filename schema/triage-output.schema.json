@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ph-auto-label.local/schema/triage-output.schema.json",
+  "title": "Native Triage Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "state", "reason", "comment"],
+  "properties": {
+    "category": {
+      "type": "string",
+      "enum": ["bug", "enhancement"],
+      "description": "Triage category."
+    },
+    "state": {
+      "type": "string",
+      "enum": ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"],
+      "description": "One of the five Matt Pocock native states."
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 4000,
+      "description": "Concise rationale for the chosen state."
+    },
+    "comment": {
+      "type": "string",
+      "maxLength": 12000,
+      "description": "Triage comment; must begin with the AI disclaimer and, per state, contain its required structure."
+    }
+  }
+}
