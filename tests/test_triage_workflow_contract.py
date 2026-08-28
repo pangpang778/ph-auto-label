@@ -53,20 +53,19 @@ def test_marketplace_catalog_is_pinned_and_loaded():
     import json
 
     catalog = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
-    assert catalog["name"] == "ph-auto-label"
-    (entry,) = catalog["plugins"]
-    assert entry["name"] == "mattpocock-skills"
-    assert entry["version"] == "1.2.3"
-    assert entry["source"] == {
-        "source": "github",
-        "repo": "mattpocock/skills",
-        "sha": PLUGIN_SHA,
+    assert catalog["plugins"] == {
+        "mattpocock-skills": {
+            "version": "1.2.3",
+            "source": {
+                "source": "github",
+                "repo": "mattpocock/skills",
+                "sha": PLUGIN_SHA,
+            },
+        }
     }
     text = WORKFLOW.read_text(encoding="utf-8")
-    # claude-code-action wants the marketplace inline; it must pin the same sha.
-    assert '"repo": "mattpocock/skills"' in text
-    assert PLUGIN_SHA in text
-    assert "plugin_marketplaces:" in text
+    # claude-code-action mounts the checked-out repo dir as a local marketplace.
+    assert "plugin_marketplaces: ${{ github.workspace }}" in text
     assert "plugins: mattpocock-skills@ph-auto-label" in text
 
 

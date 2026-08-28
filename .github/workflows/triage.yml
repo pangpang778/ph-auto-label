@@ -89,11 +89,10 @@ jobs:
           python - <<'PY'
           import json, pathlib, sys
           catalog = json.loads(pathlib.Path(".claude-plugin/marketplace.json").read_text())
-          entry = catalog["plugins"][0]
+          entry = catalog["plugins"]["mattpocock-skills"]
           src = entry["source"]
           ok = (
               catalog.get("name") == "ph-auto-label"
-              and entry.get("name") == "mattpocock-skills"
               and entry.get("version") == "1.2.3"
               and src.get("source") == "github"
               and src.get("repo") == "mattpocock/skills"
@@ -126,17 +125,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.GH_AW_ANTHROPIC_API_KEY }}
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          plugin_marketplaces: |
-            [
-              {
-                "name": "ph-auto-label",
-                "source": {
-                  "source": "github",
-                  "repo": "mattpocock/skills",
-                  "sha": "6acc160e4e0cd062dbbbd7a1b26ae92855edf07e"
-                }
-              }
-            ]
+          plugin_marketplaces: ${{ github.workspace }}
           plugins: mattpocock-skills@ph-auto-label
           claude_args: >
             --tools "Read,Glob,Grep,Skill"

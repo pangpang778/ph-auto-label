@@ -1,8 +1,7 @@
 {
   "name": "ph-auto-label",
-  "plugins": [
-    {
-      "name": "mattpocock-skills",
+  "plugins": {
+    "mattpocock-skills": {
       "version": "1.2.3",
       "source": {
         "source": "github",
@@ -10,5 +9,5 @@
         "sha": "6acc160e4e0cd062dbbbd7a1b26ae92855edf07e"
       }
     }
-  ]
+  }
 }
