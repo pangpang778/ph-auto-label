@@ -58,11 +58,19 @@ def test_marketplace_catalog_is_pinned_and_loaded():
     (entry,) = catalog["plugins"]
     assert entry["name"] == "mattpocock-skills"
     assert entry["version"] == "1.2.3"
-    assert entry["source"] == {
-        "source": "github",
-        "repo": "mattpocock/skills",
-        "sha": PLUGIN_SHA,
-    }
+    # Vendored local source; the upstream sha pin lives in the plugin manifest.
+    assert entry["source"] == "./plugins/mattpocock-skills"
+    plugin = json.loads(
+        (ROOT / "plugins" / "mattpocock-skills" / ".claude-plugin" / "plugin.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert plugin["name"] == "mattpocock-skills"
+    assert PLUGIN_SHA in plugin["description"]
+    assert (ROOT / "plugins" / "mattpocock-skills" / "skills" / "engineering" / "triage" / "SKILL.md").is_file()
+    assert "name: triage" in (
+        ROOT / "plugins" / "mattpocock-skills" / "skills" / "engineering" / "triage" / "SKILL.md"
+    ).read_text(encoding="utf-8")
     text = WORKFLOW.read_text(encoding="utf-8")
     # claude-code-action mounts the checked-out repo dir as a local marketplace.
     assert "plugin_marketplaces: ${{ github.workspace }}" in text

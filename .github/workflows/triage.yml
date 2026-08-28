@@ -83,22 +83,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Fail closed if the pinned plugin catalog is ever replaced on the branch.
+      # Fail closed if the pinned vendored plugin is ever replaced on the branch.
       - name: Verify plugin catalog
         run: |
           python - <<'PY'
           import json, pathlib, sys
           catalog = json.loads(pathlib.Path(".claude-plugin/marketplace.json").read_text())
           entry = catalog["plugins"][0]
-          src = entry["source"]
+          plugin = json.loads(pathlib.Path("plugins/mattpocock-skills/.claude-plugin/plugin.json").read_text())
           ok = (
               catalog.get("name") == "ph-auto-label"
               and isinstance(catalog.get("owner"), dict)
               and entry.get("name") == "mattpocock-skills"
               and entry.get("version") == "1.2.3"
-              and src.get("source") == "github"
-              and src.get("repo") == "mattpocock/skills"
-              and src.get("sha") == "6acc160e4e0cd062dbbbd7a1b26ae92855edf07e"
+              and entry.get("source") == "./plugins/mattpocock-skills"
+              and plugin.get("name") == "mattpocock-skills"
+              and "6acc160e4e0cd062dbbbd7a1b26ae92855edf07e" in plugin.get("description", "")
+              and pathlib.Path("plugins/mattpocock-skills/skills/engineering/triage/SKILL.md").is_file()
           )
           sys.exit(0 if ok else 1)
           PY
