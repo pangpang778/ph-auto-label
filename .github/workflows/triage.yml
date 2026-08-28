@@ -28,6 +28,7 @@ jobs:
   # outputs. Never passes model/comment/user text as control data.
   preflight:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       issues: read
@@ -56,6 +57,7 @@ jobs:
     needs: [preflight]
     if: needs.preflight.outputs.should_analyze == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       issues: read
@@ -170,6 +172,7 @@ jobs:
       && needs.preflight.outputs.should_run == 'true'
       && (needs.analyze.result == 'success' || needs.analyze.skipped == true)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write
@@ -188,7 +191,7 @@ jobs:
         continue-on-error: true
       - name: Apply triage result
         env:
-          TRIAGE_RESULT_PATH: ${{ runner.temp }}/result/triage-result.json
+          TRIAGE_RESULT_PATH: ${{ github.workspace }}/result/triage-result.json
           TRIAGE_TARGET_TYPE: ${{ needs.preflight.outputs.target_type }}
           TRIAGE_TARGET_NUMBER: ${{ needs.preflight.outputs.target_number }}
           TRIAGE_EVENT_KEY: ${{ needs.preflight.outputs.event_key }}
