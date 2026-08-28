@@ -1,0 +1,19 @@
+{
+  "name": "mattpocock-skills",
+  "version": "1.2.3",
+  "description": "Vendored snapshot of Matt Pocock's engineering/triage skill, pinned to upstream mattpocock/skills@6acc160e4e0cd062dbbbd7a1b26ae92855edf07e. Vendored so the CI bridge loads it from a local path (no third-party git clone, which the repo-scoped GITHUB_TOKEN breaks).",
+  "author": {
+    "name": "Matt Pocock",
+    "url": "https://www.aihero.dev"
+  },
+  "homepage": "https://www.aihero.dev/s/skills-newsletter",
+  "repository": "https://github.com/mattpocock/skills",
+  "license": "MIT",
+  "keywords": [
+    "engineering",
+    "triage"
+  ],
+  "skills": [
+    "./skills/engineering/triage"
+  ]
+}

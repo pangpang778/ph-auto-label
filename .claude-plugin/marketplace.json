@@ -7,11 +7,7 @@
     {
       "name": "mattpocock-skills",
       "version": "1.2.3",
-      "source": {
-        "source": "github",
-        "repo": "mattpocock/skills",
-        "sha": "6acc160e4e0cd062dbbbd7a1b26ae92855edf07e"
-      }
+      "source": "./plugins/mattpocock-skills"
     }
   ]
 }
