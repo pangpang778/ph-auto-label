@@ -155,11 +155,35 @@ class GitHubClient:
     def collaborator_permission(self, login: str) -> str:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", login):
             raise TriageError(REASON_CONTEXT, "actor login is invalid")
-        result = self.request("GET", f"/repos/{self.repository}/collaborators/{login}/permission")
-        value = result.get("permission") if isinstance(result, dict) else None
-        if not isinstance(value, str):
+        # Owners are not "collaborators": GitHub returns 404 for them (and for
+        # non-collaborators). Treat 404 as "no write permission" rather than an
+        # infra failure so an unauthorized /triage degrades to a clean skip.
+        path = f"/repos/{self.repository}/collaborators/{login}/permission"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": "ph-auto-label-triage",
+        }
+        request = urllib.request.Request(f"{self.base_url}{path}", headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return ""
+            raise TriageError(REASON_CONTEXT, f"GitHub API request failed: GET {path}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise TriageError(REASON_CONTEXT, f"GitHub API request failed: GET {path}") from exc
+        if not raw:
             raise TriageError(REASON_CONTEXT, "actor permission is unavailable")
-        return value
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise TriageError(REASON_CONTEXT, "GitHub API returned invalid JSON") from exc
+        permission = value.get("permission") if isinstance(value, dict) else None
+        if not isinstance(permission, str):
+            raise TriageError(REASON_CONTEXT, "actor permission is unavailable")
+        return permission
 
     def list_comments(self, number: int) -> list[dict[str, Any]]:
         comments: list[dict[str, Any]] = []
@@ -443,8 +467,14 @@ def decide_preflight(
                 reason="ordinary_issue_comment",
             )
         login = sender.get("login")
-        permission = client.collaborator_permission(str(login)) if isinstance(login, str) else ""
-        if permission not in {"write", "admin"}:
+        # Prefer the webhook's author_association (owner/collaborator/member are
+        # authoritative and need no extra API call); fall back to the
+        # collaborator permission check only when association is absent/blank.
+        association = str(event.get("comment", {}).get("author_association", ""))
+        allowed = association in {"OWNER", "MEMBER", "COLLABORATOR"}
+        if not allowed and isinstance(login, str):
+            allowed = client.collaborator_permission(login) in {"write", "admin"}
+        if not allowed:
             return dict(
                 empty,
                 target_type=target.target_type,

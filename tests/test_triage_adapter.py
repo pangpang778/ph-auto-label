@@ -17,6 +17,7 @@ from pytest import fixture
 from scripts.triage_context import build_context
 from scripts.triage_adapter import (
     AI_DISCLAIMER,
+    GitHubClient,
     MARKER_OPEN,
     MANAGED_CATEGORIES,
     MANAGED_LABELS,
@@ -411,6 +412,28 @@ class TestPreflight:
         ev.update({"comment": {"id": 7, "body": "/triage", "user": {"type": "User"}}})
         d = decide_preflight("issue_comment", ev, client=self.Client(permission="write"), writer_bot_id=BOT)
         assert d["run"] and d["analyze"] and d["event_key"] == "comment:7:created"
+
+    def test_owner_association_authorizes_without_permission_check(self):
+        # Owners are not "collaborators" (GitHub returns 404 on the permission
+        # endpoint); author_association must grant authority on its own.
+        ev = self.issue_event(action="created")
+        ev.update({"comment": {"id": 7, "body": "/triage", "user": {"type": "User"}, "author_association": "OWNER"}})
+        d = decide_preflight("issue_comment", ev, client=self.Client(permission="read"), writer_bot_id=BOT)
+        assert d["run"] and d["analyze"] and d["event_key"] == "comment:7:created"
+
+    def test_collaborator_permission_404_means_no_write(self, monkeypatch):
+        import urllib.error
+
+        client = GitHubClient(token="x", api_url="https://api.github.com", repository="o/r")
+        calls = []
+
+        def boom(url, **_kw):
+            calls.append(url)
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        monkeypatch.setattr("urllib.request.urlopen", boom)
+        assert client.collaborator_permission("pangpang778") == ""
+        assert calls, "collaborator permission endpoint should be consulted"
 
     def test_internal_pr_skipped(self):
         ev = {
