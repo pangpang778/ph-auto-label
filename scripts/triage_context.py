@@ -58,14 +58,14 @@ def build_context(
     item = client.get_issue_or_pr(target_number)
     title = item.get("title", "")
     body = _bounded_text(item.get("body") or "", CONTEXT_MAX_BODY_BYTES)
-    author = {"login": item.get("user", {}).get("login", "")}
+    author = {"login": (item.get("user") or {}).get("login", "")}
     labels = [lbl.get("name", "") for lbl in item.get("labels", [])]
     comments = []
     try:
         for c in client.list_comments(target_number):
             comments.append(
                 {
-                    "author": c.get("user", {}).get("login", ""),
+                    "author": (c.get("user") or {}).get("login", ""),
                     "body": _bounded_text(c.get("body", ""), CONTEXT_MAX_COMMENT_BYTES),
                 }
             )

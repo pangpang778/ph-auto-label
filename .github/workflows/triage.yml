@@ -34,7 +34,14 @@ jobs:
       issues: read
       pull-requests: read
     steps:
+      # Always run the trustable bridge code from the default branch. Under
+      # pull_request_target the default checkout would load the PR head's merge
+      # commit (untrusted code); pin to master so scripts/schema never execute
+      # from PR-supplied files. Fail-closed: rename the default branch and this
+      # step errors loudly instead of silently running untrusted code.
       - uses: actions/checkout@61b9e3751b92087fd0b06925ba6dd6314e06f089
+        with:
+          ref: master
       - uses: actions/setup-python@2241d846baea6518b39bec0fb3859d75cb3d3c50
         with:
           python-version: "3.12"
@@ -63,7 +70,14 @@ jobs:
       issues: read
       pull-requests: read
     steps:
+      # Always run the trustable bridge code from the default branch. Under
+      # pull_request_target the default checkout would load the PR head's merge
+      # commit (untrusted code); pin to master so scripts/schema never execute
+      # from PR-supplied files. Fail-closed: rename the default branch and this
+      # step errors loudly instead of silently running untrusted code.
       - uses: actions/checkout@61b9e3751b92087fd0b06925ba6dd6314e06f089
+        with:
+          ref: master
       - uses: actions/setup-python@2241d846baea6518b39bec0fb3859d75cb3d3c50
         with:
           python-version: "3.12"
@@ -178,7 +192,14 @@ jobs:
       issues: write
       pull-requests: read
     steps:
+      # Always run the trustable bridge code from the default branch. Under
+      # pull_request_target the default checkout would load the PR head's merge
+      # commit (untrusted code); pin to master so scripts/schema never execute
+      # from PR-supplied files. Fail-closed: rename the default branch and this
+      # step errors loudly instead of silently running untrusted code.
       - uses: actions/checkout@61b9e3751b92087fd0b06925ba6dd6314e06f089
+        with:
+          ref: master
       - uses: actions/setup-python@2241d846baea6518b39bec0fb3859d75cb3d3c50
         with:
           python-version: "3.12"

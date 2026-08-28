@@ -183,7 +183,7 @@ class TestPlanMutations:
         assert e.value.reason == REASON_CONFLICT
 
     def test_stale_pr_head_rejected(self):
-        pr = Target("pull_request", 7, "pr:7:opened:" + H, H)
+        pr = Target("pr", 7, "pr:7:opened:" + H, H)
         with pytest.raises(TriageError) as e:
             plan_mutations(
                 result(),
@@ -198,7 +198,7 @@ class TestPlanMutations:
         assert e.value.reason == REASON_STALE
 
     def test_pr_missing_head_is_context_failure(self):
-        pr = Target("pull_request", 7, "pr:7:opened:" + H, H)
+        pr = Target("pr", 7, "pr:7:opened:" + H, H)
         with pytest.raises(TriageError) as e:
             plan_mutations(
                 result(),
@@ -214,7 +214,7 @@ class TestPlanMutations:
 
     @pytest.mark.parametrize("state", ["needs-triage", "ready-for-agent", "wontfix"])
     def test_incomplete_external_pr_diff_rejects_non_partial_states(self, state):
-        pr = Target("pull_request", 7, "pr:7:opened:" + H, H)
+        pr = Target("pr", 7, "pr:7:opened:" + H, H)
         with pytest.raises(TriageError) as e:
             plan_mutations(
                 result(state=state),
@@ -230,7 +230,7 @@ class TestPlanMutations:
 
     @pytest.mark.parametrize("state", ["needs-info", "ready-for-human"])
     def test_incomplete_external_pr_diff_accepts_partial_states(self, state):
-        pr = Target("pull_request", 7, "pr:7:opened:" + H, H)
+        pr = Target("pr", 7, "pr:7:opened:" + H, H)
         m = plan_mutations(
             result(state=state),
             target=pr,

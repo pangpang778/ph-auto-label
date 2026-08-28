@@ -311,7 +311,7 @@ def plan_mutations(
     diff_complete: bool,
 ) -> list[Mutation]:
     """Compute the exact ordered GitHub writes, or fail closed with zero writes."""
-    if target.target_type == "pull_request":
+    if target.target_type == "pr":
         if not current_head:
             raise TriageError(REASON_CONTEXT, "pull request head SHA is unavailable")
         if target.head_sha and current_head != target.head_sha:
