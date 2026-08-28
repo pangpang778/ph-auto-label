@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 
 from triage_adapter import GitHubClient, TriageError, decide_preflight
@@ -40,6 +41,7 @@ def main() -> int:
         client = GitHubClient(token, api_url, repository)
         decision = decide_preflight(event_name, event, client=client, writer_bot_id=writer_bot_id)
     except (OSError, json.JSONDecodeError, TriageError):
+        traceback.print_exc(file=sys.stderr)
         decision = {
             "run": False,
             "analyze": False,
