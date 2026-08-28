@@ -171,7 +171,7 @@ jobs:
           TRIAGE_RESULT: ${{ steps.triage.outputs.structured_output }}
         run: printf '%s' "$TRIAGE_RESULT" > "$RUNNER_TEMP/triage-result.json"
 
-      - uses: actions/upload-artifact@0c366cb4fc8897159c94880f94b55bc716ad6a66
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: triage-result
           path: ${{ runner.temp }}/triage-result.json
@@ -205,7 +205,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@2a5974104b6d5dbdb2f9468a3e54da3bdd241578
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: triage-result
           path: result
